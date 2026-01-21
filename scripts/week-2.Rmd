@@ -1,0 +1,137 @@
+---
+title: "week 2"
+author: "wafo"
+date: "2026-01-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# course
+### load packages
+```{r}
+library('tidyverse')
+```
+
+### load dataset
+```{r}
+HDBCarparkInformation <- read_csv("../data/HDBCarparkInformation.csv")
+```
+
+### extract a column
+```{r}
+head(HDBCarparkInformation$address, 10)
+```
+
+### extract a row or couple of rows or designated rows
+```{r}
+HDBCarparkInformation[1, ]
+HDBCarparkInformation[1:5, ]
+HDBCarparkInformation[c(10, 25, 50), ]
+```
+
+### create a subset and assign it to a variable, compare average height of all carpark and daily carpark
+```{r}
+daily_carpark <- subset(HDBCarparkInformation, night_parking == 'NO')
+mean(HDBCarparkInformation$gantry_height)
+mean(daily_carpark$gantry_height)
+```
+
+### small data examination to look out for min and max
+```{r}
+summary(HDBCarparkInformation$gantry_height)
+```
+
+### examine the count of different number in specific column
+```{r}
+table(HDBCarparkInformation$gantry_height)
+```
+
+### filter two times (create subset in a subset)
+```{r}
+c <- subset(HDBCarparkInformation, gantry_height<9.99)
+d <- subset(c, gantry_height>0)
+table(d$gantry_height)
+```
+
+### filter one time with greater and smaller
+```{r}
+e <- subset(HDBCarparkInformation, gantry_height<9.99 & gantry_height>0)
+table(e$gantry_height)
+```
+### filter one time with 'not equal' and get the average gantry_height
+```{r}
+f <- subset(HDBCarparkInformation, gantry_height != 9.99 & gantry_height != 0)
+table(f$gantry_height)
+mean(f$gantry_height)
+```
+# exercise
+```{r}
+ListofGovernmentMarketsHawkerCentres <- read_csv("../data/ListofGovernmentMarketsHawkerCentres.csv")
+```
+```{r}
+table(ListofGovernmentMarketsHawkerCentres$type_of_centre)
+count <- subset(ListofGovernmentMarketsHawkerCentres, type_of_centre != 'MHC')
+count(count)
+```
+### bind rows
+```{r}
+count_HC <- subset(ListofGovernmentMarketsHawkerCentres, type_of_centre == 'HC')
+count_MK <- subset(ListofGovernmentMarketsHawkerCentres, type_of_centre == 'MK')
+join <- bind_rows(count_HC, count_MK)
+summary(join)
+count(join)
+```
+
+
+```{r}
+num_of_stall <- (ListofGovernmentMarketsHawkerCentres$no_of_stalls)
+sum_of_stall <- sum(num_of_stall)
+average <- sum_of_stall/num_of_stall
+```
+
+### 10 min times up
+
+---
+
+### check num of rows
+```{r}
+nrow(ListofGovernmentMarketsHawkerCentres)
+summary(ListofGovernmentMarketsHawkerCentres$no_of_stalls)
+```
+
+### check data quality though the dataset's website already said 0% null
+```{r}
+table(ListofGovernmentMarketsHawkerCentres$no_of_stalls)
+mean(ListofGovernmentMarketsHawkerCentres$no_of_stalls)
+max(ListofGovernmentMarketsHawkerCentres$no_of_stalls)
+```
+### find the centers that have more than 400 stalls and their names
+```{r}
+larger_centers <- subset(ListofGovernmentMarketsHawkerCentres, no_of_stalls >= 400)
+nrow(larger_centers)
+larger_centers$name_of_centre
+```
+
+
+# First plot
+visualize the distribution of number of stalls in centres across SG. 
+
+```{r}
+ggplot(data=ListofGovernmentMarketsHawkerCentres, mapping = aes(x=no_of_stalls)) + geom_histogram()
+```
+
+
+
+
+
+
+
+
+
+
+### references (APA)
+1. Housing & Development Board. (2015). HDB Carpark Information (2026) [Dataset]. data.gov.sg. Retrieved January 21, 2026 from https://data.gov.sg/datasets/d_23f946fa557947f93a8043bbef41dd09/view
+2. National Environment Agency. (2016). List of Government Markets Hawker Centres (2024) [Dataset]. data.gov.sg. Retrieved January 21, 2026 from https://data.gov.sg/datasets/d_68a42f09f350881996d83f9cd73ab02f/view
