@@ -1,0 +1,54 @@
+---
+title: "week 3"
+author: "wafo"
+date: "2026-01-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+flats <- read_csv("../data/FlatsConstructedByHousingAndDevelopmentBoardAnnual.csv")
+```
+
+```{r}
+HDBPropertyInformation <- read_csv("../data/HDBPropertyInformation.csv")
+```
+```{r}
+ggplot(data = flats, mapping = aes(x = year, y = -flats_constructed)) + geom_line() + geom_point(colour = 'red', size = 5, shape = 4)
+```
+```{r}
+ggplot(data = flats, mapping = aes(x = year, y = flats_constructed, colour = flats_constructed)) + geom_line() + geom_point()
+```
+```{r}
+ggplot(data = HDBPropertyInformation, mapping = aes(x = total_dwelling_units)) + geom_histogram(bins = 40)
+```
+```{r}
+residential <- subset(HDBPropertyInformation, residential == 'Y')
+ggplot(data = residential, mapping = aes(total_dwelling_units)) + geom_histogram(bins = 40)
+```
+```{r}
+ggplot(data = subset(HDBPropertyInformation, residential == 'Y'), mapping = aes(total_dwelling_units)) + geom_histogram(bins = 40)
+```
+```{r}
+table(HDBPropertyInformation$bldg_contract_town)
+```
+```{r}
+ggplot(data = subset(HDBPropertyInformation, residential == 'Y'), mapping = aes(total_dwelling_units)) + geom_histogram(bins = 40) + facet_wrap(~bldg_contract_town)
+```
+```{r}
+ggplot(data = HDBPropertyInformation, mapping = aes(x = year_completed, y = max_floor_lvl, colour = max_floor_lvl)) + geom_point(size = HDBPropertyInformation$max_floor_lvl/10, alpha = HDBPropertyInformation$max_floor_lvl/1000)
+```
+```{r}
+ggplot(data = HDBPropertyInformation, mapping = aes(x = year_completed, y = max_floor_lvl, colour = max_floor_lvl)) + geom_jitter(size = 0.2)
+```
+```{r}
+ggplot(data = HDBPropertyInformation, mapping = aes(x = year_completed, y = max_floor_lvl, colour = max_floor_lvl)) + geom_count()
+```
+
