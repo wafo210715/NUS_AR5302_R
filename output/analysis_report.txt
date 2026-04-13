@@ -1,0 +1,40 @@
+============================================================
+TESCO STORE DISTRIBUTION & DIETARY PATTERNS ANALYSIS
+SUMMARY REPORT
+============================================================
+
+1. DATA SUMMARY
+----------------------------------------
+   - LSOAs analyzed: 4833
+   - LSOAs with Tesco stores: 519
+   - Total Tesco stores: 577
+
+2. STORE DISTRIBUTION
+----------------------------------------
+   - Express stores: 487
+   - Superstores: 47
+   - Extra stores: 31
+
+3. PCA RESULTS
+----------------------------------------
+   - PC1 variance explained: 35.4%
+   - PC2 variance explained: 13.2%
+   - Total (PC1+PC2): 48.7%
+
+4. REGRESSION RESULTS
+----------------------------------------
+
+   PC1 (Convenience Pattern):
+     Model 1 (Store only): R² = 0.0044
+     Model 2 (IMD only): R² = 0.0043
+     Model 3 (Store + IMD): R² = 0.0085
+
+   PC2 (Variety Pattern):
+     Model 1 (Store only): R² = 0.0056
+     Model 2 (IMD only): R² = 0.2218
+     Model 3 (Store + IMD): R² = 0.2279
+
+5. INTERPRETATION
+----------------------------------------
+   - Both store characteristics and IMD contribute to
+     explaining dietary patterns (combined effect)

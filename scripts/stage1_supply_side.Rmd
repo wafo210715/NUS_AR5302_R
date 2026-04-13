@@ -1,0 +1,1728 @@
+---
+title: "When Deprivation Explains Nothing: Re-examining the Drivers of Food Purchasing Behaviour"
+author: "Li Guanhong"
+date: "2026-03-30"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    fig_width: 12
+    fig_height: 10
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  cache   = TRUE
+)
+
+# ── Packages ──────────────────────────────────────────────────────────
+required_packages <- c("sf", "dplyr", "ggplot2", "patchwork", "scales",
+                       "tidyr", "spdep", "cluster", "factoextra")
+
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, repos = "https://cloud.r-project.org", quiet = TRUE)
+  }
+}
+
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(tidyr)
+
+sf_use_s2(FALSE)  # Required for projected data (EPSG:27700)
+```
+
+```{r theme-setup, include = FALSE}
+# ── Color Palettes (Okabe-Ito, Nature-Recommended) ──────────────────────
+# Categorical palette (up to 8 categories)
+pal_categorical <- c(
+  "#E69F00",  # Orange — primary accent
+  "#56B4E9",  # Sky Blue — secondary accent
+  "#009E73",  # Bluish Green
+  "#F0E442",  # Yellow (use sparingly, poor contrast on white)
+  "#CC79A7",  # Pink/Violet
+  "#0077BB",  # Blue
+  "#D55E00",  # Vermilion
+  "#000000"   # Black
+)
+
+# Store type colors (3 categories — from categorical, picking best contrast)
+pal_store_type <- c(
+  "Express"    = "#0077BB",  # Blue
+  "Superstore" = "#009E73",  # Green
+  "Extra"      = "#D55E00"   # Vermilion/Orange-Red
+)
+
+# Model comparison colors (4 methods)
+pal_model <- c(
+  "OLS"      = "#CC79A7",  # Pink
+  "LASSO"    = "#0077BB",  # Blue
+  "XGBoost"  = "#009E73",  # Green
+  "IMD Total" = "#E69F00"  # Orange
+)
+
+# Cluster colors (4 clusters — distinct, colorblind-safe)
+pal_cluster <- c(
+  "Standard Urban"       = "#56B4E9",  # Sky Blue
+  "Superstore-dominant"  = "#E69F00",  # Orange
+  "Full Service"         = "#009E73",  # Green
+  "Underserved"          = "#D55E00"   # Vermilion
+)
+
+# SHAP gradient (blue-white-red)
+shap_gradient <- c(low = "#2166AC", mid = "#F7F7F7", high = "#B2182B")
+
+# Accent for LOESS/smooth lines
+accent_line <- "#CC3311"
+
+# ── Unified Base Theme ──────────────────────────────────────────────────
+theme_pub <- function(base_size = 11, map_mode = FALSE) {
+  ret <- theme_minimal(base_size = base_size) +
+    theme(
+      # Typography
+      plot.title    = element_text(face = "bold", size = base_size + 2),
+      plot.subtitle = element_text(size = base_size - 1, colour = "grey40"),
+      plot.caption  = element_text(size = base_size - 3, colour = "grey50",
+                                   hjust = 1, margin = margin(t = 4)),
+      strip.text    = element_text(face = "bold", size = base_size),
+
+      # Legend
+      legend.position    = "bottom",
+      legend.text        = element_text(size = base_size - 2),
+      legend.title       = element_text(face = "bold", size = base_size - 1),
+      legend.key.width   = unit(1.2, "cm"),
+      legend.margin      = margin(4, 4, 4, 4),
+      legend.box.margin  = margin(0, 0, 4, 0),
+
+      # Grid
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(colour = "grey92", linewidth = 0.3),
+
+      # Axes
+      axis.title  = element_text(size = base_size),
+      axis.text   = element_text(size = base_size - 1),
+
+      # Margins
+      plot.margin = margin(8, 8, 8, 8, unit = "pt")
+    )
+
+  if (map_mode) {
+    ret <- ret + theme(
+      axis.text  = element_blank(),
+      axis.ticks = element_blank(),
+      panel.grid = element_blank()
+    )
+  }
+
+  ret
+}
+```
+
+```{r paths, include = FALSE}
+# Resolve project root (two levels up from scripts/)
+PROJ <- normalizePath("..")
+CSV  <- file.path(PROJ, "output/csv")
+SHP  <- file.path(PROJ, "output/shp")
+```
+
+---
+
+## 1. Introduction
+
+Food deserts — areas with limited access to affordable, nutritious food — remain a persistent concern in urban public health. Conventional approaches rely on supply-side accessibility indices (e.g., the CDRC E-Food Desert Index), which measure proximity to retailers but say nothing about what people actually purchase. Two recent studies highlight this supply-demand disconnect. Broadbridge et al. (2025) used Tesco Grocery 1.0 — 420 million food items purchased by 1.6 million Clubcard holders across London — to identify food deserts from actual purchasing patterns, finding that walking time to the nearest store had almost no effect on purchase healthiness, while income and BAME population share were significant drivers. Beydoun et al. (2026) decomposed IMD into its seven sub-domains and found that employment deprivation dominated E-Food Desert Index prediction, with IMD total correlating at only r = 0.40.
+
+The use of IMD as a single composite score has been subject to sustained critique. Deas et al. (2003) argued that the composite score masks heterogeneity across constituent domains. Kelly (2026) demonstrated that IMD total explains only ~5% of household income variation — a remarkably poor proxy. These critiques motivate our design: rather than accepting IMD total as given, we progressively decompose and ultimately dissolve it.
+
+Neither study tests whether the same deprivation dimensions that predict supply-side accessibility also predict demand-side purchasing behaviour. Using the same Tesco Grocery 1.0 dataset, we ask:
+
+To what extent do area-level deprivation (and its sub-domains), supply-side factors, and socio-demographic characteristics explain spatial variation in food purchasing patterns across London?
+
+Specifically: (1) Does spatial heterogeneity in Tesco store accessibility exist independently of deprivation? (2) Which deprivation sub-domains are most associated with purchasing behaviour, and does this align with Beydoun's finding that employment deprivation dominates supply-side food desert risk? (3) When all factors compete in a single model, which retain predictive power?
+
+The analysis proceeds in three stages — supply-side spatial analysis, deprivation sub-domain decomposition, and multi-factor prediction — each serving a diagnostic purpose: isolating what IMD conceals and what it proxies for. Our contribution is structural, not methodological: we demonstrate that the apparent explanatory power of deprivation is an artefact of composite measurement, and identify the socio-demographic conditions it merely indexes.
+
+---
+
+## 2. Stage 1: Supply-Side Spatial Analysis
+
+We use POI data for 565 Tesco stores across Greater London (Express, Superstore, Extra formats), generating 15-minute walking isochrones via OSRM. Coverage is computed as the fraction of each geographic unit's area intersecting each store type's buffer union. 
+
+```{r poi}
+poi <- read.csv(file.path(CSV, "poi_tesco_stores.csv"))
+
+# Remove non-food stores (Tesco Mobile)
+poi <- poi %>% filter(store_type != "Unknown")
+
+# Convert to sf (WGS84 → British National Grid)
+poi_sf <- st_as_sf(poi, coords = c("lon", "lat"), crs = "EPSG:4326")
+poi_sf <- st_transform(poi_sf, crs = 27700)
+```
+
+```{r buffers}
+BUFFER_DIST <- 1250  # metres
+
+# Create buffer for each store
+poi_sf <- poi_sf %>%
+  mutate(buffer = st_buffer(geometry, dist = BUFFER_DIST))
+
+# Union buffers by store type (3 polygons instead of 565 — critical for performance)
+buffers_by_type <- poi_sf %>%
+  group_by(store_type) %>%
+  summarise(geometry = st_union(buffer), .groups = "drop")
+
+# Union of ALL buffers (for total_coverage)
+buffer_all <- poi_sf %>%
+  summarise(geometry = st_union(buffer))
+```
+
+```{r boundaries}
+# Load shapefiles (geometry only, strip pre-computed columns)
+lsoa_geom <- st_read(file.path(SHP, "lsoa_boundaries/lsoa_boundaries.shp"),
+                     quiet = TRUE) %>%
+  select(lsoa_code, geometry) %>%
+  st_make_valid()
+
+msoa_geom <- st_read(file.path(SHP, "msoa_boundaries/msoa_boundaries.shp"),
+                     quiet = TRUE) %>%
+  select(MSOA11CD, geometry) %>%
+  st_make_valid()
+
+ward_geom <- st_read(file.path(SHP, "ward_boundaries/ward_boundaries.shp"),
+                     quiet = TRUE) %>%
+  select(WD11CD, geometry) %>%
+  st_make_valid()
+
+bor_geom <- st_read(file.path(SHP, "borough_boundaries/borough_boundaries.shp"),
+                    quiet = TRUE) %>%
+  select(bor_code, geometry) %>%
+  rename(borough_code = bor_code) %>%
+  st_make_valid()
+
+# Verify CRS
+stopifnot(st_crs(lsoa_geom)$epsg == 27700)
+```
+
+```{r buffer-viz, fig.width = 10, fig.height = 8}
+ggplot() +
+  geom_sf(data = msoa_geom, fill = NA, colour = "grey70", linewidth = 0.1) +
+  geom_sf(data = buffers_by_type, aes(fill = store_type), alpha = 0.3, colour = NA) +
+  geom_sf(data = poi_sf, aes(colour = store_type), size = 0.8, alpha = 0.6) +
+  scale_fill_manual(values = pal_store_type, name = "Store Type") +
+  scale_colour_manual(values = pal_store_type, name = "Store Type") +
+  labs(
+    title = "Fig. 1. Tesco Store Locations with 1250m Walking Buffers",
+    subtitle = sprintf("%d stores | Buffer = 15-min walk (%dm)", nrow(poi_sf), BUFFER_DIST),
+    caption = "Data: Tesco Grocery 1.0 (Aiello et al., 2020) | Boundaries: ONS Open Geography"
+  ) +
+  theme_pub(base_size = 11, map_mode = TRUE) +
+  theme(legend.position = "right")
+```
+
+```{r coverage-function}
+compute_coverage <- function(boundaries, buffers_by_type, buffer_all, id_col) {
+
+  # Compute area of each boundary unit (projected CRS → square metres)
+  boundaries <- boundaries %>%
+    mutate(area_m2 = as.numeric(st_area(geometry)))
+
+  id_col_sym <- sym(id_col)
+  store_types <- buffers_by_type$store_type
+  cov_cols <- character(0)
+
+  for (st in store_types) {
+    buf <- buffers_by_type %>% filter(store_type == !!st)
+    col_name <- paste0(tolower(st), "_coverage")
+
+    # st_intersection only returns rows WHERE intersection exists
+    inter <- st_intersection(boundaries %>% select(all_of(id_col), geometry), buf)
+
+    # Sum overlap areas per geographic unit
+    overlap_df <- inter %>%
+      mutate(overlap_m2 = as.numeric(st_area(geometry))) %>%
+      as.data.frame() %>%
+      group_by(!!id_col_sym) %>%
+      summarise(overlap_m2 = sum(overlap_m2), .groups = "drop") %>%
+      rename(!!col_name := overlap_m2)
+
+    # Join back — units with 0% coverage get NA, then 0
+    boundaries <- boundaries %>%
+      left_join(overlap_df, by = id_col) %>%
+      mutate(!!col_name := (!!sym(col_name)) / area_m2 * 100,
+             !!col_name := replace_na(!!sym(col_name), 0))
+
+    cov_cols <- c(cov_cols, col_name)
+  }
+
+  # Total coverage (union of ALL store types)
+  inter_all <- st_intersection(
+    boundaries %>% select(all_of(id_col), geometry),
+    buffer_all
+  )
+  total_df <- inter_all %>%
+    mutate(total_m2 = as.numeric(st_area(geometry))) %>%
+    as.data.frame() %>%
+    group_by(!!id_col_sym) %>%
+    summarise(total_m2 = sum(total_m2), .groups = "drop") %>%
+    rename(total_coverage = total_m2)
+
+  boundaries <- boundaries %>%
+    left_join(total_df, by = id_col) %>%
+    mutate(
+      total_coverage = total_coverage / area_m2 * 100,
+      total_coverage = replace_na(total_coverage, 0)
+    )
+
+  # Derived metrics
+  boundaries <- boundaries %>%
+    mutate(
+      overlap_index = !!sym(cov_cols[1]) + !!sym(cov_cols[2]) + !!sym(cov_cols[3]) - total_coverage,
+      unique_types = (!!sym(cov_cols[1]) > 0) + (!!sym(cov_cols[2]) > 0) + (!!sym(cov_cols[3]) > 0)
+    )
+
+  # Clean up temp column
+  boundaries <- boundaries %>% select(-area_m2)
+
+  return(boundaries)
+}
+```
+
+```{r compute-coverage, cache.extra = 1}
+lsoa_cov <- compute_coverage(lsoa_geom, buffers_by_type, buffer_all, "lsoa_code")
+msoa_cov <- compute_coverage(msoa_geom, buffers_by_type, buffer_all, "MSOA11CD")
+ward_cov <- compute_coverage(ward_geom, buffers_by_type, buffer_all, "WD11CD")
+bor_cov <- compute_coverage(bor_geom, buffers_by_type, buffer_all, "borough_code")
+```
+
+```{r check-na, include = FALSE}
+cov_cols <- c("express_coverage", "superstore_coverage", "extra_coverage",
+              "total_coverage", "overlap_index", "unique_types")
+
+for (name in c("lsoa_cov", "msoa_cov", "ward_cov", "bor_cov")) {
+  df <- get(name)
+  na_counts <- sapply(cov_cols, function(c) sum(is.na(df[[c]])))
+  total_na  <- sum(na_counts)
+  cat(sprintf("%s (%d rows): %d NAs total", name, nrow(df), total_na))
+  if (total_na > 0) {
+    cat(" ← ")
+    cat(paste(names(na_counts[na_counts > 0]), collapse = ", "))
+  }
+  cat("\n")
+}
+
+# Out-of-bounds: values > 100 from floating point precision in st_intersection
+for (name in c("lsoa_cov", "msoa_cov", "ward_cov", "bor_cov")) {
+  df <- get(name)
+  for (c in c("express_coverage", "superstore_coverage", "extra_coverage", "total_coverage")) {
+    n_above <- sum(df[[c]] > 100, na.rm = TRUE)
+    if (n_above > 0) cat(sprintf("  %s.%s: %d values > 100\n", name, c, n_above))
+  }
+}
+```
+
+```{r shapefile-check, fig.width = 16, fig.height = 14, include = FALSE}
+plot_boundary <- function(gdf, title) {
+  ggplot(gdf) +
+    geom_sf(fill = "#2ca02c", colour = "white", linewidth = 0.1) +
+    labs(title = title) +
+    theme_minimal(base_size = 10) +
+    theme(plot.title = element_text(face = "bold"),
+          axis.text = element_blank(), axis.ticks = element_blank(),
+          plot.margin = margin(2, 2, 2, 2, unit = "pt"))
+}
+
+plot_area <- function(gdf, title) {
+  gdf_area <- gdf %>% mutate(area_m2 = as.numeric(st_area(geometry)))
+  ggplot(gdf_area) +
+    geom_sf(aes(fill = area_m2), colour = "white", linewidth = 0.1) +
+    scale_fill_viridis_c(na.value = "grey50") +
+    labs(title = title) +
+    theme_minimal(base_size = 10) +
+    theme(plot.title = element_text(face = "bold"),
+          axis.text = element_blank(), axis.ticks = element_blank(),
+          plot.margin = margin(2, 2, 2, 2, unit = "pt"))
+}
+
+(plot_boundary(lsoa_geom, "LSOA") | plot_boundary(msoa_geom, "MSOA")) /
+  (plot_boundary(ward_geom, "Ward") | plot_boundary(bor_geom, "Borough")) +
+  plot_layout(heights = c(1, 1)) +
+  plot_annotation(title = "Shapefile & Area Check",
+                  theme = theme(plot.title = element_text(face = "bold", size = 14)))
+
+(plot_area(lsoa_geom, "LSOA area_m2") | plot_area(msoa_geom, "MSOA area_m2")) /
+  (plot_area(ward_geom, "Ward area_m2") | plot_area(bor_geom, "Borough area_m2")) +
+  plot_layout(heights = c(1, 1)) +
+  plot_annotation(title = "Area Check (viridis)",
+                  theme = theme(plot.title = element_text(face = "bold", size = 14)))
+```
+
+```{r summary-table, include = FALSE}
+cov_metrics <- c("express_coverage", "superstore_coverage", "extra_coverage",
+                 "total_coverage", "overlap_index", "unique_types")
+
+make_summary <- function(df, scale_name) {
+  data.frame(
+    Scale = scale_name,
+    n = nrow(df),
+    Metric = cov_metrics,
+    Mean = sapply(cov_metrics, function(m) mean(df[[m]], na.rm = TRUE)),
+    SD = sapply(cov_metrics, function(m) sd(df[[m]], na.rm = TRUE)),
+    Min = sapply(cov_metrics, function(m) min(df[[m]], na.rm = TRUE)),
+    Median = sapply(cov_metrics, function(m) median(df[[m]], na.rm = TRUE)),
+    Max = sapply(cov_metrics, function(m) max(df[[m]], na.rm = TRUE))
+  )
+}
+
+summary_all <- bind_rows(
+  make_summary(lsoa_cov, "LSOA"),
+  make_summary(msoa_cov, "MSOA"),
+  make_summary(ward_cov, "Ward"),
+  make_summary(bor_cov, "Borough")
+)
+
+knitr::kable(summary_all, digits = 1,
+             caption = "Coverage Summary Across Geographic Scales")
+```
+
+```{r helper}
+make_panel <- function(gdf, title, point_size = 0.3) {
+  p <- ggplot(gdf) +
+    geom_sf(aes(fill = total_coverage), colour = NA, linewidth = 0) +
+    geom_sf(data = poi_sf, colour = "black", size = point_size, alpha = 0.4) +
+    scale_fill_gradient(
+      low = "#FFFFCC", high = "#B2182B",
+      breaks = seq(0, 100, by = 20),
+      labels = percent_format(scale = 1, suffix = "%")
+    ) +
+    labs(
+      title = title,
+      subtitle = sprintf("n = %d | Mean = %.1f%% | SD = %.1f%%",
+                         nrow(gdf),
+                         mean(gdf$total_coverage, na.rm = TRUE),
+                         sd(gdf$total_coverage, na.rm = TRUE))
+    ) +
+    theme_pub(base_size = 10, map_mode = TRUE) +
+    theme(
+      legend.position  = "none",
+      plot.margin      = margin(2, 2, 2, 2, unit = "pt")
+    )
+  # Boundary lines for coarser geographies
+  if (nrow(gdf) <= 40) {
+    p <- p + geom_sf(colour = "white", linewidth = 0.3, fill = NA)
+  }
+  p
+}
+```
+
+```{r multiscale, fig.width = 16, fig.height = 14, }
+p1 <- make_panel(lsoa_cov, "LSOA Level",           point_size = 0.2)
+p2 <- make_panel(msoa_cov, "MSOA Level",           point_size = 0.3)
+p3 <- make_panel(ward_cov, "Ward Level",           point_size = 0.3)
+p4 <- make_panel(bor_cov,  "London Borough Level", point_size = 0.8)
+
+# Shared legend on MSOA panel
+p2 <- p2 +
+  theme(legend.position  = "right",
+        legend.key.width = unit(1.5, "cm")) +
+  labs(fill = "Coverage\n(% area)")
+
+combined <- (p1 | p2) / (p3 | p4) +
+  plot_layout(heights = c(1, 1)) +
+  plot_annotation(
+    title    = "Fig. 2. Tesco Store Accessibility Across London: Multi-Scale Comparison",
+    subtitle = "15-minute walking buffer coverage (% of area covered by at least one Tesco store)",
+    caption  = "Data: Tesco Grocery 1.0 (Aiello et al., 2020) | Boundaries: ONS Open Geography | LSOA (~1,500) | MSOA (~7,200) | Ward | Borough (~250,000)",
+    theme    = theme(
+      plot.title    = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(size = 10, colour = "grey40"),
+      plot.caption  = element_text(size = 8, colour = "grey50", hjust = 1)
+    )
+  )
+
+combined
+```
+
+After comparing LSOA, MSOA, Ward, and Borough scales, MSOA (n = 961) is selected for offering the clearest spatial differentiation.
+
+```{r msoa-by-type, fig.width = 16, fig.height = 6, include = FALSE}
+make_type_panel <- function(gdf, metric, title) {
+  ggplot(gdf) +
+    geom_sf(aes_string(fill = metric), colour = NA, linewidth = 0) +
+    geom_sf(data = poi_sf, colour = "black", size = 0.2, alpha = 0.3) +
+    scale_fill_gradient(
+      low = "#FFFFCC", high = "#B2182B",
+      breaks = seq(0, 100, by = 20),
+      labels = percent_format(scale = 1, suffix = "%")
+    ) +
+    labs(title = title) +
+    theme_minimal(base_size = 10) +
+    theme(
+      legend.position  = "none",
+      plot.title       = element_text(face = "bold"),
+      axis.text        = element_blank(),
+      axis.ticks       = element_blank()
+    )
+}
+
+p_exp <- make_type_panel(msoa_cov, "express_coverage",    "Express")
+p_sup <- make_type_panel(msoa_cov, "superstore_coverage", "Superstore")
+p_ext <- make_type_panel(msoa_cov, "extra_coverage",      "Extra")
+
+p_sup <- p_sup +
+  theme(legend.position = "right", legend.key.width = unit(1.5, "cm")) +
+  labs(fill = "Coverage\n(% area)")
+
+(p_exp | p_sup | p_ext) +
+  plot_annotation(
+    title    = "MSOA Coverage by Store Type",
+    subtitle = "1250m walking buffer",
+    theme    = theme(
+      plot.title    = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 10, colour = "grey40")
+    )
+  )
+```
+
+```{r cluster-load, include = FALSE}
+suppressPackageStartupMessages({
+  library(cluster)
+  library(factoextra)
+})
+```
+
+```{r kmeans-features}
+features <- msoa_cov %>%
+  st_drop_geometry() %>%
+  select(express_coverage, superstore_coverage, extra_coverage) %>%
+  scale()
+```
+
+```{r kmeans-optimal, fig.width = 8, fig.height = 6}
+set.seed(42)
+fviz_nbclust(features, kmeans, method = "silhouette", k.max = 6) +
+  labs(title = "Optimal Number of Clusters (Silhouette Method)",
+       subtitle = "Average silhouette width for k = 2 to 6") +
+  theme_pub(base_size = 10)
+```
+
+```{r kmeans-fit}
+set.seed(42)
+k_chosen <- 4  # Adjust based on silhouette plot
+km <- kmeans(features, centers = k_chosen, nstart = 25)
+
+msoa_cov$cluster <- factor(km$cluster)
+```
+
+```{r cluster-map, fig.width = 10, fig.height = 7}
+cluster_labels <- c("1" = "Standard Urban", "2" = "Superstore-dominant",
+                    "3" = "Full Service", "4" = "Underserved")
+
+ggplot(msoa_cov) +
+  geom_sf(aes(fill = cluster), colour = "white", linewidth = 0.05, alpha = 0.75) +
+  scale_fill_brewer(palette = "Paired", name = "Cluster",
+                    labels = cluster_labels) +
+  labs(
+    title = "Fig. 3. K-Means Service Typology Clusters (MSOA Level)",
+    subtitle = sprintf("k = %d | Features: Express, Superstore, Extra coverage", k_chosen),
+    caption = "Data: Tesco Grocery 1.0 (Aiello et al., 2020) | Boundaries: ONS Open Geography"
+  ) +
+  theme_pub(base_size = 11, map_mode = TRUE) +
+  theme(legend.position = "right")
+```
+
+```{r cluster-composition}
+centers_orig <- scale(km$centers, center = FALSE,
+                      scale = attr(features, "scaled:scale"))
+centers_orig <- sweep(centers_orig, 2, attr(features, "scaled:center"), "+")
+
+comp <- msoa_cov %>%
+  st_drop_geometry() %>%
+  group_by(cluster) %>%
+  summarise(
+    n            = n(),
+    pct          = round(n / nrow(msoa_cov) * 100, 1),
+    express      = round(mean(express_coverage), 1),
+    superstore   = round(mean(superstore_coverage), 1),
+    extra        = round(mean(extra_coverage), 1),
+    total        = round(mean(total_coverage), 1),
+    .groups      = "drop"
+  )
+
+knitr::kable(comp, caption = "Cluster Composition (mean coverage %)")
+```
+
+K-Means clustering (k = 4, silhouette = 0.6+) identifies four service-area types: Standard Urban (55.6%, high Express + Superstore), Superstore-dominant (6.4%), Full Service (16.7%, all types), and Underserved (20.0%, concentrated in outer London).
+
+```{r spdep-load, include = FALSE}
+suppressPackageStartupMessages({
+  library(spdep)
+})
+```
+
+```{r morans-I}
+nb <- poly2nb(msoa_cov, queen = TRUE, snap = 0.01)
+lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+```
+
+```{r morans-results}
+metrics <- c("total_coverage", "express_coverage",
+             "superstore_coverage", "extra_coverage", "overlap_index")
+
+moran_results <- lapply(metrics, function(m) {
+  test <- moran.test(msoa_cov[[m]], lw, zero.policy = TRUE)
+  data.frame(
+    Metric = m,
+    I      = round(test$estimate["Moran I statistic"], 4),
+    E_I    = round(test$estimate["Expectation"], 4),
+    p      = signif(test$p.value, 3)
+  )
+}) %>% bind_rows()
+
+knitr::kable(moran_results,
+             caption = "Moran's I (MSOA level)")
+```
+
+Moran's I confirms moderate spatial clustering across all coverage metrics (0.45–0.58, all p < 0.001).
+
+```{r imd-aggregate}
+imd <- read.csv(file.path(CSV, "imd_subdomains.csv"))
+lookup <- read.csv(file.path(PROJ, "data/raw/lsoa_full_lookup.csv"))
+
+# Population for weighting (ONS 2015 mid-year estimates via Tesco data)
+pop <- read.csv(file.path(PROJ, "tesco-data/7796666/year_lsoa_grocery.csv")) %>%
+  select(lsoa_code = area_id, population)
+
+imd_cols <- c("imd_score", "income", "employment", "education",
+              "health", "crime", "barriers", "living_environment")
+msoa_cov <- msoa_cov %>% select(-any_of(imd_cols))
+
+imd_msoa <- imd %>%
+  left_join(lookup %>% select(lsoa_code, MSOA11CD), by = "lsoa_code") %>%
+  left_join(pop, by = "lsoa_code") %>%
+  filter(population > 0) %>%
+  group_by(MSOA11CD) %>%
+  summarise(
+    imd_score          = weighted.mean(imd_score, w = population, na.rm = TRUE),
+    income             = weighted.mean(income, w = population, na.rm = TRUE),
+    employment         = weighted.mean(employment, w = population, na.rm = TRUE),
+    education          = weighted.mean(education, w = population, na.rm = TRUE),
+    health             = weighted.mean(health, w = population, na.rm = TRUE),
+    crime              = weighted.mean(crime, w = population, na.rm = TRUE),
+    barriers           = weighted.mean(barriers, w = population, na.rm = TRUE),
+    living_environment = weighted.mean(living_environment, w = population, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+msoa_cov <- msoa_cov %>%
+  left_join(imd_msoa, by = "MSOA11CD")
+```
+
+```{r imd-correlation}
+cov_cols <- c("total_coverage", "express_coverage",
+              "superstore_coverage", "extra_coverage", "overlap_index")
+
+cor_results <- lapply(cov_cols, function(c) {
+  test <- cor.test(msoa_cov[[c]], msoa_cov$imd_score, method = "pearson")
+  data.frame(
+    Coverage = c,
+    r        = round(test$estimate, 4),
+    p        = signif(test$p.value, 3)
+  )
+}) %>% bind_rows()
+
+knitr::kable(cor_results, digits = 4,
+             caption = "Correlation: Coverage Metrics vs IMD Score (MSOA level)")
+```
+
+```{r imd-scatter, fig.width = 8, fig.height = 5}
+msoa_cov %>%
+  ggplot(aes(x = imd_score, y = total_coverage)) +
+  geom_point(alpha = 0.4, size = 1) +
+  geom_smooth(method = "loess", se = TRUE, colour = "red", linewidth = 0.8) +
+  labs(
+    title = "Fig. 4. Total Coverage vs IMD Score",
+    subtitle = sprintf("Pearson r = %.4f | n = %d MSOAs",
+                       cor(msoa_cov$total_coverage,
+                           msoa_cov$imd_score,
+                           use = "complete.obs"),
+                       nrow(msoa_cov)),
+    x = "IMD Score (higher = more deprived)",
+    y = "Total Coverage (%)",
+    caption = "Data: Tesco Grocery 1.0 (Aiello et al., 2020) | IMD 2015: Gov.uk"
+  ) +
+  theme_pub(base_size = 11)
+```
+
+Supply-side coverage shows only weak association with deprivation (r = 0.21).
+
+```{r imd-anova}
+# Check normality of IMD per cluster (Shapiro-Wilk on a sample)
+shapiro_results <- msoa_cov %>%
+  group_by(cluster) %>%
+  group_modify(~ {
+    s <- shapiro.test(sample(.$imd_score, min(5000, nrow(.))))
+    data.frame(W = round(s$statistic, 4), p = signif(s$p.value, 3))
+  }) %>% ungroup()
+
+knitr::kable(shapiro_results, caption = "Shapiro-Wilk Normality Test for IMD per Cluster")
+```
+
+```{r imd-kw-or-anova}
+# If any cluster fails normality, use Kruskal-Wallis; otherwise ANOVA
+use_kw <- any(shapiro_results$p < 0.05)
+
+if (use_kw) {
+  kw <- kruskal.test(imd_score ~ cluster, data = msoa_cov)
+  kw_table <- data.frame(
+    Test = "Kruskal-Wallis",
+    `Chi-squared` = round(kw$statistic, 2),
+    df = kw$parameter,
+    `p-value` = format.pval(kw$p.value, digits = 4, eps = 1e-9)
+  )
+} else {
+  aov_fit <- aov(imd_score ~ cluster, data = msoa_cov)
+  aov_sum <- summary(aov_fit)[[1]]
+  kw_table <- data.frame(
+    Test = "ANOVA",
+    `F-value` = round(aov_sum$`F value`[1], 2),
+    df = paste(round(aov_sum$Df[1]), round(aov_sum$Df[2]), sep = ", "),
+    `p-value` = format.pval(aov_sum$`Pr(>F)`[1], digits = 4, eps = 1e-9)
+  )
+}
+
+knitr::kable(kw_table, caption = "Group Difference Test: IMD Score Across Clusters")
+```
+
+```{r imd-posthoc}
+if (use_kw) {
+  pw <- pairwise.wilcox.test(msoa_cov$imd_score, msoa_cov$cluster,
+                              p.adjust.method = "bonferroni")
+  # Convert to tidy data.frame
+  pw_df <- as.data.frame(pw$p.value, check.names = FALSE) %>%
+    mutate(Group = rownames(.)) %>%
+    pivot_longer(-Group, names_to = "Comparison", values_to = "p_adj") %>%
+    filter(!is.na(p_adj)) %>%
+    mutate(
+      Sig = case_when(
+        p_adj < 0.001 ~ "***",
+        p_adj < 0.01  ~ "**",
+        p_adj < 0.05  ~ "*",
+        TRUE            ~ ""
+      ),
+      p_adj = format.pval(p_adj, digits = 3, eps = 1e-9)
+    )
+  knitr::kable(pw_df, caption = "Post-hoc Pairwise Wilcoxon Test (Bonferroni-adjusted)")
+} else {
+  tukey <- TukeyHSD(aov(imd_score ~ cluster, data = msoa_cov))
+  tukey_df <- as.data.frame(tukey$cluster) %>%
+    rownames_to_column("Comparison") %>%
+    mutate(
+      Sig = case_when(
+        `p adj` < 0.001 ~ "***",
+        `p adj` < 0.01  ~ "**",
+        `p adj` < 0.05  ~ "*",
+        TRUE              ~ ""
+      ),
+      `p adj` = format.pval(`p adj`, digits = 3, eps = 1e-9)
+    )
+  knitr::kable(tukey_df, caption = "Post-hoc Tukey HSD Test")
+}
+```
+
+However, a categorical analysis reveals a striking pattern. A Shapiro-Wilk test rejects normality for three of four clusters (W = 0.96–0.98, p < 0.05), so we apply the non-parametric Kruskal-Wallis test, which yields χ²(3) = 40.70, p = 7.5 × 10⁻⁹. A post-hoc pairwise Wilcoxon test with Bonferroni correction confirms that Cluster 3 (Full Service) and Cluster 4 (Underserved) differ most strongly (p = 6.9 × 10⁻⁹). 
+
+```{r imd-cluster-boxplot, fig.width = 8, fig.height = 6}
+ggplot(msoa_cov, aes(x = cluster, y = imd_score, fill = cluster)) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
+  scale_fill_brewer(palette = "Set2", guide = "none") +
+  labs(
+    title = "Fig. 5. IMD Score by Service Typology Cluster",
+    subtitle = sprintf("Kruskal-Wallis \u03c7\u00b2(3) = %.2f, p = %s",
+                       kw$statistic, format.pval(kw$p.value, digits = 4, eps = 1e-9)),
+    x = "Cluster", y = "IMD Score (higher = more deprived)",
+    caption = "Data: Tesco Grocery 1.0 (Aiello et al., 2020) | IMD 2015: Gov.uk"
+  ) +
+  theme_pub(base_size = 11)
+```
+
+Counterintuitively, the best-served areas — those with the highest total coverage including Extra stores — are also the most deprived (mean IMD ≈ 27), while Cluster 4 (Underserved) has the lowest mean IMD (≈ 19). This inversion challenges the conventional food desert narrative and suggests that Tesco's large-format stores concentrate precisely in the dense, deprived inner-London areas where demand and footfall are highest.
+
+```{r save}
+msoa_cov %>% st_drop_geometry() %>%
+  write.csv(file.path(CSV, "coverage_msoa_rmd.csv"), row.names = FALSE)
+```
+
+
+## 3. Stage 2: IMD Sub-Domain Decomposition
+
+We perform PCA on 13 food category proportions at LSOA level (n = 4,835), aggregated to MSOA. PC1 (Convenience: processed vs. fresh, 35.4% variance) and PC2 (Hedonic: alcohol-centric, 13.2%) serve as dependent variables. Model A regresses PCs on IMD total; Model B decomposes IMD into seven sub-domains; LASSO tests which survive regularisation.
+
+```{r s2-packages, include = FALSE}
+s2_packages <- c("glmnet", "broom", "forcats", "modelsummary", "gtsummary")
+
+for (pkg in s2_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, repos = "https://cloud.r-project.org", quiet = TRUE)
+  }
+}
+
+suppressPackageStartupMessages({
+  library(glmnet)
+  library(broom)
+  library(forcats)
+  library(modelsummary)
+  library(gtsummary)
+})
+```
+
+```{r s2-load-grocery}
+# Load Tesco grocery data (food categories + population)
+grocery <- read.csv(file.path(PROJ, "tesco-data/7796666/year_lsoa_grocery.csv"))
+```
+
+```{r s2-food-categories}
+# Food categories used in PCA (Broadbridge et al., 2025)
+FOOD_CATEGORIES <- c("f_beer", "f_dairy", "f_eggs", "f_fats_oils", "f_fish",
+                     "f_fruit_veg", "f_grains", "f_meat_red", "f_poultry",
+                     "f_readymade", "f_soft_drinks", "f_sweets", "f_wine")
+
+available <- FOOD_CATEGORIES[FOOD_CATEGORIES %in% names(grocery)]
+```
+
+```{r s2-pca}
+# Extract food category matrix, replace NA with 0
+X_food <- grocery %>%
+  select(all_of(available)) %>%
+  mutate(across(everything(), ~ replace_na(.x, 0)))
+
+# PCA on standardised food categories
+pca_fit <- prcomp(X_food, scale. = TRUE)
+
+# Variance explained
+var_exp <- pca_fit$sdev^2 / sum(pca_fit$sdev^2) * 100
+
+# PC loadings
+loadings <- data.frame(
+  Category = available,
+  PC1 = round(pca_fit$rotation[, 1], 3),
+  PC2 = round(pca_fit$rotation[, 2], 3)
+)
+
+knitr::kable(loadings, caption = "PCA Loadings (PC1 and PC2)")
+
+# Store PCA scores with LSOA code
+pca_lsoa <- data.frame(
+  lsoa_code = grocery$area_id,
+  PC1       = pca_fit$x[, 1],
+  PC2       = pca_fit$x[, 2]
+)
+```
+
+```{r s2-pca-biplot, fig.width = 10, fig.height = 8}
+# Build arrow data from PCA loadings (scaled for visual clarity)
+arrow_df <- data.frame(
+  Category = available,
+  PC1 = pca_fit$rotation[, 1],
+  PC2 = pca_fit$rotation[, 2]
+) %>%
+  mutate(
+    Category = recode(Category,
+      f_beer = "Beer", f_dairy = "Dairy", f_eggs = "Eggs",
+      f_fats_oils = "Fats & Oils", f_fish = "Fish",
+      f_fruit_veg = "Fruit & Veg", f_grains = "Grains",
+      f_meat_red = "Red Meat", f_poultry = "Poultry",
+      f_readymade = "Ready Meals", f_soft_drinks = "Soft Drinks",
+      f_sweets = "Sweets", f_wine = "Wine")
+  )
+
+# Scale arrows to match score axis range
+arrow_scale <- min(
+  diff(range(pca_lsoa$PC1)) / diff(range(arrow_df$PC1)),
+  diff(range(pca_lsoa$PC2)) / diff(range(arrow_df$PC2))
+) * 0.8
+
+ggplot(pca_lsoa, aes(x = PC1, y = PC2)) +
+  geom_point(alpha = 0.15, colour = "#4477AA", size = 0.8) +
+  geom_segment(
+    data = arrow_df,
+    aes(x = 0, y = 0, xend = PC1 * arrow_scale, yend = PC2 * arrow_scale),
+    arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+    colour = "#CC3311", linewidth = 0.8
+  ) +
+  geom_text(
+    data = arrow_df,
+    aes(x = PC1 * arrow_scale, y = PC2 * arrow_scale, label = Category),
+    colour = "#CC3311", size = 3, fontface = "bold",
+    hjust = ifelse(arrow_df$PC1 > 0, -0.1, 1.1),
+    vjust = ifelse(arrow_df$PC2 > 0, -0.3, 1.1)
+  ) +
+  geom_hline(yintercept = 0, colour = "grey70", linewidth = 0.3) +
+  geom_vline(xintercept = 0, colour = "grey70", linewidth = 0.3) +
+  labs(
+    title = "Fig. 6. PCA Biplot: Food Purchasing Patterns",
+    subtitle = sprintf("PC1 (%.1f%% variance) vs PC2 (%.1f%% variance) | n = %d LSOAs",
+                       var_exp[1], var_exp[2], nrow(pca_lsoa)),
+    x = sprintf("PC1 — Convenience (%.1f%%)", var_exp[1]),
+    y = sprintf("PC2 — Variety (%.1f%%)", var_exp[2]),
+    caption = "Data: Tesco Grocery 1.0 (Aiello et al., 2020) | Blue dots = LSOA scores | Red arrows = food category loadings"
+  ) +
+  theme_pub(base_size = 10)
+```
+
+PC1 (35.4% variance) captures a Convenience dimension: positive loadings on processed, ambient, and convenience foods versus negative loadings on fresh produce, meat, and dairy — effectively distinguishing processed-heavy from fresh-oriented purchasing baskets. PC2 (13.2% variance) captures a Hedonic dimension dominated by alcohol expenditure, distinguishing areas with above-average alcohol purchasing from those without.
+
+```{r s2-merge}
+# Domain names
+domain_names <- c("income", "employment", "education", "health",
+                  "crime", "barriers", "living_environment")
+
+# Merge PCA + IMD + lookup + population
+lsoa_merged <- pca_lsoa %>%
+  inner_join(imd, by = "lsoa_code") %>%
+  inner_join(lookup %>% select(lsoa_code, MSOA11CD), by = "lsoa_code") %>%
+  inner_join(pop, by = "lsoa_code") %>%
+  filter(!is.na(PC1), !is.na(PC2), population > 0)
+```
+
+```{r s2-aggregate}
+agg_vars <- c("PC1", "PC2", "imd_score", domain_names)
+
+msoa_df <- lsoa_merged %>%
+  group_by(MSOA11CD) %>%
+  summarise(
+    across(all_of(agg_vars),
+           ~ weighted.mean(.x, w = population, na.rm = TRUE),
+           .names = "{.col}"),
+    n_lsoa = n(),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(PC1))
+```
+
+```{r s2-standardize}
+z_vars <- c("PC1", "PC2", "imd_score", domain_names)
+msoa_df <- msoa_df %>%
+  mutate(across(all_of(z_vars), scale, .names = "{.col}_z"))
+```
+
+```{r s2-pca-maps, fig.width = 14, fig.height = 7}
+# Join the MSOA boundaries with your aggregated PCA scores
+msoa_pca_spatial <- msoa_geom %>%
+  left_join(msoa_df, by = "MSOA11CD") %>%
+  filter(!is.na(PC1))
+
+# Function to generate standardized spatial PCA maps
+plot_spatial_pca <- function(spatial_data, metric, title, subtitle) {
+  ggplot(spatial_data) +
+    geom_sf(aes_string(fill = metric), colour = NA, linewidth = 0) +
+    geom_sf(data = bor_geom, fill = NA, colour = "white", linewidth = 0.3) +
+    scale_fill_distiller(
+      palette = "RdBu", direction = -1, name = "Z-Score",
+      limits = c(-3, 3), oob = scales::squish
+    ) +
+    labs(title = title, subtitle = subtitle) +
+    theme_pub(base_size = 11, map_mode = TRUE) +
+    theme(
+      legend.position = "bottom",
+      legend.key.width = unit(1.5, "cm")
+    )
+}
+
+# Generate maps
+map_pc1 <- plot_spatial_pca(
+  msoa_pca_spatial, "PC1_z", 
+  "Spatial Distribution of 'Convenience' Purchasing (PC1)",
+  "High scores indicate reliance on processed/ready-made foods"
+)
+
+map_pc2 <- plot_spatial_pca(
+  msoa_pca_spatial, "PC2_z", 
+  "Spatial Distribution of 'Variety' Purchasing (PC2)",
+  "High scores indicate a broader, more diverse grocery basket"
+)
+
+# Combine using patchwork
+map_pc1 + map_pc2 + 
+  plot_layout(ncol = 2) +
+  plot_annotation(
+    title = "Fig. 7. Geographic Distribution of Food Purchasing Patterns in London",
+    subtitle = "Standardised Principal Component scores (Z-scores) aggregated to the MSOA level",
+    caption = "Data: Tesco Grocery 1.0 (Aiello et al., 2020) | Boundaries: ONS Open Geography",
+    theme = theme(
+      plot.title    = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(size = 10, colour = "grey40"),
+      plot.caption  = element_text(size = 8, colour = "grey50", hjust = 1)
+    )
+  )
+```
+
+```{r s2-model-a}
+model_a_pc1 <- lm(PC1_z ~ imd_score_z, data = msoa_df)
+model_a_pc2 <- lm(PC2_z ~ imd_score_z, data = msoa_df)
+
+modelsummary(
+  list("PC1 (Convenience)" = model_a_pc1,
+       "PC2 (Variety)"     = model_a_pc2),
+  title = "Model A: OLS with IMD Total Score (MSOA level, population-weighted)",
+  stars = TRUE,
+  # This tells it to drop AIC, BIC, Log-Likelihood, etc., but keep N and R-squared
+  gof_omit = "AIC|BIC|Log.Lik.|F|RMSE", 
+  # This forces a clean, perfectly aligned markdown table instead of a floating HTML widget
+  output = "markdown" 
+)
+```
+
+Model A confirms that IMD total explains virtually none of convenience-oriented purchasing (PC1 R² = 0.014), though it performs better for hedonic purchasing (PC2 R² = 0.322).
+
+```{r s2-model-b}
+formula_b_pc1 <- as.formula(paste("PC1_z ~", paste(domain_names, collapse = " + ")))
+formula_b_pc2 <- as.formula(paste("PC2_z ~", paste(domain_names, collapse = " + ")))
+
+model_b_pc1 <- lm(formula_b_pc1, data = msoa_df)
+model_b_pc2 <- lm(formula_b_pc2, data = msoa_df)
+
+modelsummary(
+  list("PC1 (Convenience)" = model_b_pc1,
+       "PC2 (Variety)"     = model_b_pc2),
+  title = "Model B: OLS with 7 IMD Sub-Domains (MSOA level, population-weighted)",
+  stars = TRUE,
+  gof_omit = "AIC|BIC|Log.Lik.|F|RMSE",
+  output = "markdown"
+)
+```
+
+Model B dramatically improves explanatory power: PC1 adj. R² = 0.459 (32-fold increase), PC2 R² = 0.522. This reveals that IMD total actively conceals sub-domain heterogeneity — individual deprivation dimensions have opposing directional effects that cancel in the composite score.
+
+```{r s2-comparison}
+modelsummary(
+  list("A: IMD Total (PC1)"  = model_a_pc1,
+       "B: Sub-Domains (PC1)" = model_b_pc1,
+       "A: IMD Total (PC2)"  = model_a_pc2,
+       "B: Sub-Domains (PC2)" = model_b_pc2),
+  title = "Model Comparison: OLS R² (MSOA level)",
+  stars = TRUE,
+  gof_omit = "AIC|BIC|Log.Lik.|F|RMSE",
+  output = "markdown"
+)
+```
+
+Income deprivation dominates PC1 (β = +5.454, p < 0.001): more income-deprived areas purchase significantly more processed foods. For PC2, employment deprivation dominates (β = +14.036), while income deprivation reverses direction (β = −11.198). This reversal explains IMD total's failure: when income and employment deprivation pull in opposite directions, their effects cancel.
+
+```{r s2-lasso}
+X_mat <- as.matrix(msoa_df[, domain_names])
+y_pc1 <- msoa_df$PC1_z
+y_pc2 <- msoa_df$PC2_z
+
+set.seed(42)
+cv_pc1 <- cv.glmnet(X_mat, y_pc1, alpha = 1, nfolds = 5)
+lasso_pc1 <- glmnet(X_mat, y_pc1, alpha = 1, lambda = cv_pc1$lambda.min)
+lasso_coefs_pc1 <- as.numeric(coef(lasso_pc1))[-1]
+names(lasso_coefs_pc1) <- domain_names
+
+set.seed(42)
+cv_pc2 <- cv.glmnet(X_mat, y_pc2, alpha = 1, nfolds = 5)
+lasso_pc2 <- glmnet(X_mat, y_pc2, alpha = 1, lambda = cv_pc2$lambda.min)
+lasso_coefs_pc2 <- as.numeric(coef(lasso_pc2))[-1]
+names(lasso_coefs_pc2) <- domain_names
+
+lasso_table <- data.frame(
+  Domain   = domain_names,
+  PC1_coef = round(lasso_coefs_pc1, 4),
+  PC1_keep = ifelse(abs(lasso_coefs_pc1) > 1e-10, "*", ""),
+  PC2_coef = round(lasso_coefs_pc2, 4),
+  PC2_keep = ifelse(abs(lasso_coefs_pc2) > 1e-10, "*", "")
+)
+
+knitr::kable(lasso_table,
+             caption = "LASSO Coefficients (* = survived regularization)")
+```
+
+```{r s2-viz1, fig.width = 15, fig.height = 6}
+domain_labels <- c(
+  income = "Income",
+  employment = "Employment",
+  education = "Education",
+  health = "Health",
+  crime = "Crime",
+  barriers = "Barriers to\nHousing",
+  living_environment = "Living\nEnvironment"
+)
+
+coef_plot_data <- bind_rows(
+  tidy(model_b_pc1) %>%
+    filter(term != "(Intercept)") %>%
+    mutate(DV = "PC1 (Convenience)", Model = "B: Sub-domains"),
+  tidy(model_b_pc2) %>%
+    filter(term != "(Intercept)") %>%
+    mutate(DV = "PC2 (Variety)", Model = "B: Sub-domains"),
+  tidy(model_a_pc1) %>%
+    filter(term != "(Intercept)") %>%
+    mutate(term = "IMD Total", DV = "PC1 (Convenience)", Model = "A: IMD Total"),
+  tidy(model_a_pc2) %>%
+    filter(term != "(Intercept)") %>%
+    mutate(term = "IMD Total", DV = "PC2 (Variety)", Model = "A: IMD Total")
+) %>%
+  mutate(
+    sig = case_when(p.value < 0.001 ~ "***",
+                    p.value < 0.01  ~ "**",
+                    p.value < 0.05  ~ "*",
+                    TRUE            ~ ""),
+    term = factor(term, levels = rev(c("IMD Total", domain_names)))
+  )
+
+ggplot(coef_plot_data, aes(x = estimate, y = term, fill = Model)) +
+  geom_vline(xintercept = 0, colour = "grey50", linewidth = 0.4) +
+  geom_errorbar(
+    aes(xmin = estimate - 1.96 * std.error,
+        xmax = estimate + 1.96 * std.error),
+    linewidth = 0.3, position = position_dodge(0.6)
+  ) +
+  geom_point(shape = 21, size = 2.5, position = position_dodge(0.6)) +
+  geom_text(
+    aes(label = sig),
+    position = position_dodge(0.6),
+    vjust = -0.5, hjust = -0.3, size = 3, fontface = "bold"
+  ) +
+  facet_wrap(~ DV, scales = "free_x") +
+  scale_fill_manual(values = c("A: IMD Total" = "#7570B3",
+                               "B: Sub-domains" = "#D95F02"),
+                    name = NULL) +
+  labs(
+    title = "Fig. 8. OLS Regression Coefficients: IMD vs. Food Purchasing Patterns",
+    subtitle = sprintf(
+      "Model A (IMD total): R\u00b2=%.3f | Model B (7 sub-domains): R\u00b2=%.3f | MSOA level (n=%d)",
+      summary(model_a_pc1)$r.squared, summary(model_b_pc1)$r.squared, nrow(msoa_df)),
+    x = "Standardised Coefficient (± 95% CI)",
+    y = NULL,
+    caption = "DV = z-scored PC1/PC2 | *** p<0.001, ** p<0.01, * p<0.05"
+  ) +
+  theme_pub(base_size = 10)
+```
+
+The opposing effects of income and employment deprivation across PC1 and PC2 explain why IMD total is such a poor predictor: when these two dominant domains pull in opposite directions, their effects cancel in the composite score. This underscores Beydoun et al.'s (2026) broader argument — though the specific pattern differs. In Beydoun's supply-side analysis, employment deprivation dominated E-Food Desert Index prediction alone. In our demand-side analysis, employment deprivation dominates PC2 (hedonic purchasing) but is insignificant for PC1 (convenience purchasing), where income deprivation is the key driver.
+
+```{r s2-viz2, fig.width = 11, fig.height = 8}
+lasso_path_pc1 <- glmnet(X_mat, y_pc1, alpha = 1)
+lasso_path_pc2 <- glmnet(X_mat, y_pc2, alpha = 1)
+
+coef_pc1 <- as.matrix(coef(lasso_path_pc1))[-1, , drop = FALSE]
+coef_pc2 <- as.matrix(coef(lasso_path_pc2))[-1, , drop = FALSE]
+
+path_df <- bind_rows(
+  data.frame(lambda = lasso_path_pc1$lambda, t(coef_pc1),
+             DV = "PC1 (Convenience)", check.names = FALSE),
+  data.frame(lambda = lasso_path_pc2$lambda, t(coef_pc2),
+             DV = "PC2 (Variety)", check.names = FALSE)
+) %>%
+  pivot_longer(cols = -c(lambda, DV),
+               names_to = "domain", values_to = "coefficient") %>%
+  mutate(domain = recode(domain, !!!domain_labels))
+
+ggplot(path_df, aes(x = log(lambda), y = coefficient, colour = domain)) +
+  geom_line(linewidth = 0.8) +
+  geom_hline(yintercept = 0, colour = "grey50", linewidth = 0.3) +
+  geom_vline(xintercept = log(cv_pc1$lambda.min), linetype = "dashed",
+             colour = "grey60", linewidth = 0.5) +
+  facet_wrap(~ DV) +
+  scale_colour_brewer(palette = "Set2", name = "Domain") +
+  labs(
+    title = "Fig. 9. LASSO Regularization Path",
+    subtitle = sprintf("Optimal λ: PC1 = %.5f, PC2 = %.5f (dashed line)",
+                       cv_pc1$lambda.min, cv_pc2$lambda.min),
+    x = "log(λ)",
+    y = "Standardised Coefficient",
+    caption = "5-fold cross-validation | Domains with coef = 0 are eliminated"
+  ) +
+  theme_pub(base_size = 10)
+```
+
+```{r s2-viz3, fig.width = 11, fig.height = 7}
+ols_importance <- bind_rows(
+  tidy(model_b_pc1) %>%
+    filter(term != "(Intercept)") %>%
+    mutate(Method = "OLS (PC1)", importance = abs(estimate),
+           sign = ifelse(estimate > 0, "+", "-")) %>%
+    select(term, Method, importance, sign),
+  tidy(model_b_pc2) %>%
+    filter(term != "(Intercept)") %>%
+    mutate(Method = "OLS (PC2)", importance = abs(estimate),
+           sign = ifelse(estimate > 0, "+", "-")) %>%
+    select(term, Method, importance, sign)
+)
+
+lasso_importance <- bind_rows(
+  data.frame(term = names(lasso_coefs_pc1),
+             Method = "LASSO (PC1)",
+             importance = abs(lasso_coefs_pc1),
+             sign = ifelse(lasso_coefs_pc1 > 0, "+", "-")),
+  data.frame(term = names(lasso_coefs_pc2),
+             Method = "LASSO (PC2)",
+             importance = abs(lasso_coefs_pc2),
+             sign = ifelse(lasso_coefs_pc2 > 0, "+", "-"))
+)
+
+importance_df <- bind_rows(ols_importance, lasso_importance) %>%
+  mutate(
+    term = recode(term, !!!domain_labels),
+    term = fct_reorder(term, importance, .fun = mean, .desc = TRUE),
+    Method = factor(Method, levels = c("OLS (PC1)", "LASSO (PC1)",
+                                       "OLS (PC2)", "LASSO (PC2)"))
+  )
+
+ggplot(importance_df, aes(x = importance, y = term, fill = Method)) +
+  geom_col(position = position_dodge(0.7), width = 0.6, alpha = 0.85) +
+  geom_text(
+    aes(label = sign),
+    position = position_dodge(0.7),
+    vjust = -0.5, hjust = 0.5,
+    size = 2.5, fontface = "bold", colour = "grey30"
+  ) +
+  facet_wrap(~ Method, ncol = 2, scales = "free_x") +
+  scale_fill_manual(values = c(
+    "OLS (PC1)" = "#7570B3", "OLS (PC2)" = "#7570B3",
+    "LASSO (PC1)" = "#D95F02", "LASSO (PC2)" = "#D95F02"
+  )) +
+  guides(fill = "none") +
+  labs(
+    title = "Fig. 10. Variable Importance Ranking: OLS vs. LASSO",
+    subtitle = "Bar height = |standardised coefficient| | '+'/'-' = direction of association with DV",
+    x = "|Standardised Coefficient|",
+    y = NULL,
+    caption = "LASSO: coefficients set to zero are eliminated by regularisation"
+  ) +
+  theme_pub(base_size = 10) +
+  theme(
+    panel.grid.major.y = element_blank()
+  )
+```
+
+All seven sub-domains survive LASSO regularisation, confirming genuine signal even in weaker predictors.
+
+## 4. Stage 3: Multi-Factor Prediction (XGBoost + SHAP)
+
+Stage 3 integrates all variable groups — seven IMD sub-domains, six supply-side metrics, and two socio-demographic controls (% BAME, car ownership) — into an XGBoost regressor (5-fold CV) with SHAP-based interpretability. Graduated model comparison (OLS → LASSO → XGBoost) is standard in urban health research (Machefer et al., 2025); our contribution lies in what the progressive reshuffling of variable importance reveals.
+
+```{r s3-packages, include = FALSE}
+if (!requireNamespace("xgboost", quietly = TRUE)) {
+  install.packages("xgboost", repos = "https://cloud.r-project.org", quiet = TRUE)
+}
+
+suppressPackageStartupMessages({
+  library(xgboost)
+})
+```
+
+```{r s3-load-socio}
+# Load BAME and car ownership data (LSOA Atlas, 2011 Census)
+socio <- read.csv(file.path(PROJ, "data/raw/lsoa-atlas/london_lsoa_bame_car.csv"))
+
+# Aggregate to MSOA (population-weighted mean)
+socio_msoa <- socio %>%
+  left_join(pop, by = "lsoa_code") %>%
+  filter(population > 0) %>%
+  group_by(MSOA11CD) %>%
+  summarise(
+    pct_bame          = weighted.mean(pct_bame, w = population, na.rm = TRUE),
+    pct_car_ownership = weighted.mean(pct_car_ownership, w = population, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+
+```{r s3-build-features}
+# Supply-side features from Stage 1 (drop geometry + cluster text)
+supply <- msoa_cov %>%
+  st_drop_geometry() %>%
+  select(MSOA11CD, express_coverage, superstore_coverage, extra_coverage,
+         total_coverage, overlap_index, unique_types, cluster)
+
+# One-hot encode cluster (4 levels → 3 dummies, drop first as reference)
+cluster_dummies <- model.matrix(~ cluster - 1, data = supply) %>%
+  as.data.frame() %>%
+  select(-cluster1) %>%  # drop reference level
+  rename_all(~ paste0("cluster_", .))
+
+supply_wide <- supply %>%
+  select(-cluster) %>%
+  bind_cols(cluster_dummies)
+
+# Merge all features: Stage 2 (PC + IMD) + Stage 1 (supply) + socio-demographics
+feature_df <- msoa_df %>%
+  inner_join(supply_wide, by = "MSOA11CD") %>%
+  inner_join(socio_msoa, by = "MSOA11CD") %>%
+  filter(complete.cases(.))
+```
+
+```{r s3-collinearity}
+# Collinearity check: cluster dummies vs coverage metrics
+cluster_cols <- grep("^cluster_", names(feature_df), value = TRUE)
+coverage_cols <- c("express_coverage", "superstore_coverage", "extra_coverage",
+                   "total_coverage", "overlap_index", "unique_types")
+
+cor_matrix <- cor(feature_df[, c(cluster_cols, coverage_cols)], use = "complete.obs")
+high_cor <- which(abs(cor_matrix[cluster_cols, coverage_cols]) > 0.9, arr.ind = TRUE)
+
+if (nrow(high_cor) > 0) {
+  cat("HIGH COLLINEARITY detected (|r| > 0.9) between cluster dummies and coverage:\n")
+  for (i in seq_len(nrow(high_cor))) {
+    r <- cluster_cols[high_cor[i, 1]]
+    c <- coverage_cols[high_cor[i, 2]]
+    cat(sprintf("  %s vs %s: r = %.3f\n", r, c, cor_matrix[r, c]))
+  }
+  cat("→ Dropping cluster dummies, keeping raw coverage metrics\n")
+  use_cluster_dummies <- FALSE
+} else {
+  cat("No high collinearity between cluster dummies and coverage metrics (max |r| = %.3f)\n",
+      max(abs(cor_matrix[cluster_cols, coverage_cols])))
+  cat("→ Keeping both cluster dummies and raw coverage metrics\n")
+  use_cluster_dummies <- TRUE
+}
+```
+
+```{r s3-prepare-matrix}
+# Define feature columns
+feature_cols <- c(domain_names, coverage_cols)
+if (use_cluster_dummies) feature_cols <- c(feature_cols, cluster_cols)
+feature_cols <- c(feature_cols, "pct_bame", "pct_car_ownership")
+
+# Prepare feature matrix and targets
+X_mat <- as.matrix(feature_df[, feature_cols])
+colnames(X_mat) <- feature_cols
+
+y_pc1 <- feature_df$PC1_z
+y_pc2 <- feature_df$PC2_z
+```
+
+```{r s3-xgb-pc1}
+set.seed(42)
+params <- list(
+  objective        = "reg:squarederror",
+  max_depth        = 6,
+  eta              = 0.1,
+  subsample        = 0.8,
+  colsample_bytree = 0.8,
+  min_child_weight = 5,
+  nthread          = 1
+)
+
+dtrain_pc1 <- xgb.DMatrix(data = X_mat, label = y_pc1, nthread = 1)
+
+cv_pc1_xgb <- xgb.cv(
+  params = params,
+  data   = dtrain_pc1,
+  nrounds            = 500,
+  nfold              = 5,
+  early_stopping_rounds = 20,
+  verbose            = FALSE
+)
+
+best_iter_pc1 <- which.min(cv_pc1_xgb$evaluation_log$test_rmse_mean)
+best_rmse_pc1 <- min(cv_pc1_xgb$evaluation_log$test_rmse_mean)
+var_y <- var(y_pc1)
+r2_xgb_pc1 <- 1 - best_rmse_pc1^2 / var_y
+
+cat(sprintf("PC1 XGBoost: best iteration = %d, CV RMSE = %.4f, CV R² = %.4f\n",
+            best_iter_pc1, best_rmse_pc1, r2_xgb_pc1))
+```
+
+```{r s3-xgb-pc2}
+set.seed(42)
+dtrain_pc2 <- xgb.DMatrix(data = X_mat, label = y_pc2, nthread = 1)
+
+cv_pc2_xgb <- xgb.cv(
+  params = params,
+  data   = dtrain_pc2,
+  nrounds            = 500,
+  nfold              = 5,
+  early_stopping_rounds = 20,
+  verbose            = FALSE
+)
+
+best_iter_pc2 <- which.min(cv_pc2_xgb$evaluation_log$test_rmse_mean)
+best_rmse_pc2 <- min(cv_pc2_xgb$evaluation_log$test_rmse_mean)
+var_y2 <- var(y_pc2)
+r2_xgb_pc2 <- 1 - best_rmse_pc2^2 / var_y2
+
+cat(sprintf("PC2 XGBoost: best iteration = %d, CV RMSE = %.4f, CV R² = %.4f\n",
+            best_iter_pc2, best_rmse_pc2, r2_xgb_pc2))
+```
+
+```{r s3-performance}
+# LASSO R²: use 7 IMD sub-domains from feature_df (Stage 3 X_mat has 18 features)
+X_imd <- as.matrix(feature_df[, domain_names])
+lasso_pred_pc1 <- as.numeric(X_imd %*% lasso_coefs_pc1 + coef(lasso_pc1)[1])
+lasso_pred_pc2 <- as.numeric(X_imd %*% lasso_coefs_pc2 + coef(lasso_pc2)[1])
+
+perf_table <- data.frame(
+  Model = c("OLS: IMD Total", "OLS: 7 Sub-Domains", "LASSO: 7 Sub-Domains",
+            "XGBoost: All Features"),
+  PC1_R2 = c(
+    summary(model_a_pc1)$r.squared,
+    summary(model_b_pc1)$r.squared,
+    cor(lasso_pred_pc1, y_pc1)^2,
+    r2_xgb_pc1
+  ),
+  PC2_R2 = c(
+    summary(model_a_pc2)$r.squared,
+    summary(model_b_pc2)$r.squared,
+    cor(lasso_pred_pc2, y_pc2)^2,
+    r2_xgb_pc2
+  )
+)
+
+knitr::kable(perf_table, digits = 4,
+             caption = "Model Performance Comparison (MSOA level)")
+```
+
+XGBoost with all 15 features improves PC1 R² by +0.123 and PC2 R² by +0.227 over the OLS sub-domain baseline.
+
+```{r s3-shap-values}
+# Recreate DMatrix objects (xgb.cv can corrupt the originals, causing segfault)
+dtrain_pc1 <- xgb.DMatrix(data = X_mat, label = y_pc1, nthread = 1)
+dtrain_pc2 <- xgb.DMatrix(data = X_mat, label = y_pc2, nthread = 1)
+
+# Train final models on full data (best iteration from CV)
+set.seed(42)
+model_pc1 <- xgb.train(params = c(params, nthread = 1), data = dtrain_pc1,
+                        nrounds = best_iter_pc1, verbose = 0)
+set.seed(42)
+model_pc2 <- xgb.train(params = c(params, nthread = 1), data = dtrain_pc2,
+                        nrounds = best_iter_pc2, verbose = 0)
+
+# SHAP values via predcontrib
+shap_pc1 <- predict(model_pc1, newdata = dtrain_pc1, predcontrib = TRUE)
+shap_pc2 <- predict(model_pc2, newdata = dtrain_pc2, predcontrib = TRUE)
+
+# Drop last column (bias/expected value), keep feature SHAP values
+shap_mat_pc1 <- shap_pc1[, -ncol(shap_pc1)]
+shap_mat_pc2 <- shap_pc2[, -ncol(shap_pc2)]
+colnames(shap_mat_pc1) <- feature_cols
+colnames(shap_mat_pc2) <- feature_cols
+
+# Global importance: mean |SHAP|
+global_imp <- data.frame(
+  Feature = feature_cols,
+  PC1 = colMeans(abs(shap_mat_pc1)),
+  PC2 = colMeans(abs(shap_mat_pc2))
+) %>%
+  mutate(
+    Rank_PC1 = rank(-PC1),
+    Rank_PC2 = rank(-PC2),
+    Feature = factor(Feature, levels = Feature[order(-PC1)])
+  )
+```
+
+```{r s3-viz1-shap-pc1, fig.width = 12, fig.height = 8}
+library(ggbeeswarm)
+library(tidyr)
+
+# Top 15 features by mean |SHAP| for PC1
+top_15_pc1 <- global_imp %>%
+  arrange(desc(PC1)) %>%
+  slice_head(n = 15) %>%
+  pull(Feature)
+
+shap_pc1_long <- data.frame(
+  Feature = rep(feature_cols, each = nrow(feature_df)),
+  SHAP    = as.vector(shap_mat_pc1),
+  Value   = as.vector(X_mat)
+) %>%
+  filter(Feature %in% top_15_pc1) %>%
+  mutate(
+    Feature = factor(Feature, levels = rev(top_15_pc1)),
+    Value_z = ave(Value, Feature, FUN = function(x) as.numeric(scale(x)))
+  )
+
+label_pc1 <- global_imp %>%
+  filter(Feature %in% top_15_pc1) %>%
+  mutate(
+    label_text = sprintf("|SHAP|: %.3f", PC1),
+    Feature = factor(Feature, levels = rev(top_15_pc1))
+  )
+
+ggplot(shap_pc1_long, aes(x = SHAP, y = Feature, colour = Value_z)) +
+  geom_vline(xintercept = 0, colour = "grey60", linewidth = 0.6, linetype = "dashed") +
+  geom_quasirandom(groupOnX = FALSE, varwidth = TRUE, size = 1.2, alpha = 0.6) +
+  geom_text(
+    data = label_pc1,
+    aes(x = Inf, y = Feature, label = label_text),
+    inherit.aes = FALSE, hjust = 1.1, vjust = -0.5,
+    size = 2.8, colour = "grey20", fontface = "italic"
+  ) +
+  scale_colour_distiller(
+    palette = "RdBu", direction = -1,
+    name = "Feature Value\n(Z-Score)",
+    limits = c(-2.5, 2.5), oob = scales::squish
+  ) +
+  labs(
+    title = "Fig. 11. SHAP Summary: PC1 (Convenience)",
+    subtitle = "Points = individual MSOAs | Mean |SHAP| annotated on the right",
+    x = "SHAP Value (Impact on Model Output)",
+    y = NULL,
+    caption = "Red = High Feature Value | Blue = Low Feature Value | Ordered by mean |SHAP| for PC1"
+  ) +
+  theme_pub(base_size = 11) +
+  theme(
+    legend.position = "right",
+    legend.key.height = unit(1.5, "cm"),
+    panel.grid.major.y = element_blank()
+  )
+```
+
+The SHAP analysis reveals a striking reshuffling. For PC1, education deprivation (mean |SHAP| = 0.311) and living environment (0.279) emerge as top predictors, followed by car ownership (0.193) and % BAME (0.140). Income deprivation — dominant in Stage 2 (β = +5.454) — drops out of the top five entirely. This is our central finding: income deprivation was not driving purchasing behaviour; it was acting as a proxy for socio-demographic factors that more directly shape convenience-oriented purchasing. Deprivation explains nothing on its own; it merely co-varies with the structural conditions that do.
+
+```{r s3-viz1-shap-pc2, fig.width = 12, fig.height = 8}
+# Top 15 features by mean |SHAP| for PC2
+top_15_pc2 <- global_imp %>%
+  arrange(desc(PC2)) %>%
+  slice_head(n = 15) %>%
+  pull(Feature)
+
+shap_pc2_long <- data.frame(
+  Feature = rep(feature_cols, each = nrow(feature_df)),
+  SHAP    = as.vector(shap_mat_pc2),
+  Value   = as.vector(X_mat)
+) %>%
+  filter(Feature %in% top_15_pc2) %>%
+  mutate(
+    Feature = factor(Feature, levels = rev(top_15_pc2)),
+    Value_z = ave(Value, Feature, FUN = function(x) as.numeric(scale(x)))
+  )
+
+label_pc2 <- global_imp %>%
+  filter(Feature %in% top_15_pc2) %>%
+  mutate(
+    label_text = sprintf("|SHAP|: %.3f", PC2),
+    Feature = factor(Feature, levels = rev(top_15_pc2))
+  )
+
+ggplot(shap_pc2_long, aes(x = SHAP, y = Feature, colour = Value_z)) +
+  geom_vline(xintercept = 0, colour = "grey60", linewidth = 0.6, linetype = "dashed") +
+  geom_quasirandom(groupOnX = FALSE, varwidth = TRUE, size = 1.2, alpha = 0.6) +
+  geom_text(
+    data = label_pc2,
+    aes(x = Inf, y = Feature, label = label_text),
+    inherit.aes = FALSE, hjust = 1.1, vjust = -0.5,
+    size = 2.8, colour = "grey20", fontface = "italic"
+  ) +
+  scale_colour_distiller(
+    palette = "RdBu", direction = -1,
+    name = "Feature Value\n(Z-Score)",
+    limits = c(-2.5, 2.5), oob = scales::squish
+  ) +
+  labs(
+    title = "Fig. 12. SHAP Summary: PC2 (Variety)",
+    subtitle = "Points = individual MSOAs | Mean |SHAP| annotated on the right",
+    x = "SHAP Value (Impact on Model Output)",
+    y = NULL,
+    caption = "Red = High Feature Value | Blue = Low Feature Value | Ordered by mean |SHAP| for PC2"
+  ) +
+  theme_pub(base_size = 11) +
+  theme(
+    legend.position = "right",
+    legend.key.height = unit(1.5, "cm"),
+    panel.grid.major.y = element_blank()
+  )
+```
+
+For PC2, % BAME dominates overwhelmingly (0.574), directly validating Broadbridge et al. (2025). 
+
+```{r s3-viz2-dependence-pc1, fig.width = 14, fig.height = 6}
+top5_pc1 <- head(feature_cols[order(global_imp$PC1, decreasing = TRUE)], 5)
+
+dep_pc1 <- lapply(top5_pc1, function(f) {
+  data.frame(Feature = f, Value = X_mat[, f], SHAP = shap_mat_pc1[, f])
+}) %>% bind_rows() %>%
+  mutate(Feature = factor(Feature, levels = rev(top5_pc1)))
+
+ggplot(dep_pc1, aes(x = Value, y = SHAP)) +
+  geom_point(alpha = 0.2, size = 0.5, colour = "#4477AA") +
+  geom_smooth(method = "loess", se = FALSE, colour = "#CC3311",
+              linewidth = 0.6, span = 0.8) +
+  geom_hline(yintercept = 0, colour = "grey60", linewidth = 0.2, linetype = "dashed") +
+  facet_wrap(~ Feature, scales = "free") +
+  labs(
+    title = "Fig. 13. SHAP Dependence Plots — Top 5 Features (PC1)",
+    subtitle = "Each point = one MSOA | Red line = LOESS trend | Dashed = zero effect",
+    x = "Feature Value",
+    y = "SHAP Value",
+    caption = sprintf("Features ranked by mean |SHAP| for PC1: %s",
+                      paste(top5_pc1, collapse = ", "))
+  ) +
+  theme_pub(base_size = 9) +
+  theme(
+    strip.text = element_text(face = "bold", size = 8),
+    panel.grid.minor = element_blank()
+  )
+```
+
+```{r s3-viz2-dependence-pc2, fig.width = 14, fig.height = 6}
+top5_pc2 <- head(feature_cols[order(global_imp$PC2, decreasing = TRUE)], 5)
+
+dep_pc2 <- lapply(top5_pc2, function(f) {
+  data.frame(Feature = f, Value = X_mat[, f], SHAP = shap_mat_pc2[, f])
+}) %>% bind_rows() %>%
+  mutate(Feature = factor(Feature, levels = rev(top5_pc2)))
+
+ggplot(dep_pc2, aes(x = Value, y = SHAP)) +
+  geom_point(alpha = 0.2, size = 0.5, colour = "#4477AA") +
+  geom_smooth(method = "loess", se = FALSE, colour = "#CC3311",
+              linewidth = 0.6, span = 0.8) +
+  geom_hline(yintercept = 0, colour = "grey60", linewidth = 0.2, linetype = "dashed") +
+  facet_wrap(~ Feature, scales = "free") +
+  labs(
+    title = "Fig. 14. SHAP Dependence Plots — Top 5 Features (PC2)",
+    subtitle = "Each point = one MSOA | Red line = LOESS trend | Dashed = zero effect",
+    x = "Feature Value",
+    y = "SHAP Value",
+    caption = sprintf("Features ranked by mean |SHAP| for PC2: %s",
+                      paste(top5_pc2, collapse = ", "))
+  ) +
+  theme_pub(base_size = 9) +
+  theme(
+    strip.text = element_text(face = "bold", size = 8),
+    panel.grid.minor = element_blank()
+  )
+```
+
+Supply-side metrics rank low for both PCs, reinforcing that physical store accessibility explains far less than who lives in an area.
+
+```{r s3-viz3-importance, fig.width = 15, fig.height = 10}
+# Feature labels for readability
+feat_labels <- c(
+  income             = "Income",
+  employment         = "Employment",
+  education          = "Education",
+  health             = "Health",
+  crime              = "Crime",
+  barriers           = "Barriers to\nHousing",
+  living_environment = "Living\nEnvironment",
+  express_coverage   = "Express\nCoverage",
+  superstore_coverage = "Superstore\nCoverage",
+  extra_coverage     = "Extra\nCoverage",
+  total_coverage     = "Total\nCoverage",
+  overlap_index      = "Overlap\nIndex",
+  unique_types       = "Unique\nTypes",
+  pct_bame           = "% BAME",
+  pct_car_ownership  = "Car\nOwnership"
+)
+
+# Add cluster dummy labels if used
+if (use_cluster_dummies) {
+  feat_labels <- c(feat_labels,
+    cluster2 = "Cluster 2",
+    cluster3 = "Cluster 3",
+    cluster4 = "Cluster 4"
+  )
+}
+
+# Helper: build importance data for one DV
+build_imp <- function(dv, ols_mod, lasso_coefs, shap_imp) {
+  ols_df <- tidy(ols_mod) %>%
+    filter(term != "(Intercept)") %>%
+    mutate(Method = "OLS", importance = abs(estimate),
+           sign = ifelse(estimate > 0, "+", "-"))
+
+  lasso_df <- data.frame(
+    term = names(lasso_coefs), Method = "LASSO",
+    importance = abs(lasso_coefs),
+    sign = ifelse(lasso_coefs > 0, "+", "-")
+  )
+
+  xgb_df <- data.frame(
+    term = feature_cols, Method = "XGBoost",
+    importance = shap_imp, sign = NA_character_
+  )
+
+  # Combine and keep top 5 by max importance across methods
+  df <- bind_rows(ols_df, lasso_df, xgb_df) %>%
+    mutate(label = ifelse(term %in% names(feat_labels), feat_labels[term], term))
+
+  top5 <- df %>%
+    group_by(label) %>%
+    summarise(max_imp = max(importance), .groups = "drop") %>%
+    arrange(desc(max_imp)) %>%
+    slice_head(n = 5) %>%
+    pull(label)
+
+  df %>%
+    filter(label %in% top5) %>%
+    mutate(
+      label = factor(label, levels = rev(top5)),
+      Method = factor(Method, levels = c("OLS", "LASSO", "XGBoost")),
+      DV = dv
+    )
+}
+
+imp_pc1 <- build_imp("PC1 (Convenience)", model_b_pc1, lasso_coefs_pc1, global_imp$PC1)
+imp_pc2 <- build_imp("PC2 (Variety)",     model_b_pc2, lasso_coefs_pc2, global_imp$PC2)
+
+imp_df <- bind_rows(imp_pc1, imp_pc2)
+
+# Colors: match s2-viz3 OLS/LASSO colors, add XGBoost
+imp_colors <- c("OLS" = "#7570B3", "LASSO" = "#D95F02", "XGBoost" = "#1B9E77")
+
+ggplot(imp_df, aes(x = importance, y = label, fill = Method)) +
+  geom_col(position = position_dodge(0.7), width = 0.6, alpha = 0.85) +
+  geom_text(
+    aes(label = sign),
+    position = position_dodge(0.7),
+    vjust = -0.5, hjust = 0.5,
+    size = 2.5, fontface = "bold", colour = "grey30",
+    na.rm = TRUE
+  ) +
+  facet_grid(DV ~ Method, scales = "free_x", space = "free_y") +
+  scale_fill_manual(values = imp_colors) +
+  guides(fill = "none") +
+  labs(
+    title = "Fig. 15. Feature Importance: OLS → LASSO → XGBoost",
+    subtitle = sprintf("Extends Fig. 10 with XGBoost SHAP | Top 5 features per DV | OLS/LASSO: 7 IMD sub-domains | XGBoost: %d features",
+                       length(feature_cols)),
+    x = "|Coefficient| / Mean |SHAP|",
+    y = NULL,
+    caption = "'+'/'-' = direction of association (OLS/LASSO only) | XGBoost: SHAP importance is direction-neutral"
+  ) +
+  theme_pub(base_size = 9) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank()
+  )
+```
+
+The non-linear XGBoost model consistently outperforms linear baselines across both dependent variables (Table 3). This is particularly notable for PC2, where XGBoost achieves R² = 0.749 compared to OLS R² = 0.522 — a 43% relative improvement — indicating substantial non-linear structure in how socio-demographic and deprivation factors jointly shape hedonic purchasing. The Stage 3 results thus complete the arc of our argument: deprivation appears powerful when examined in isolation (Stage 2), yet its apparent explanatory power dissolves when socio-demographic context is introduced, confirming that deprivation is a proxy — not a driver — of food purchasing behaviour.
+
+## 5. Limitations
+Tesco-only data captures only Clubcard users; channel substitution is invisible. PCA on compositional data violates orthogonality assumptions (Aitchison, 1983). Walking isochrones assume uniform speed and omit public transport and driving. This is a cross-sectional study — association, not causation, is inferred. Future work should formalise these associations into causal loop diagrams (Sterman, 2000) and test them against longitudinal data, moving from critical deconstruction toward a generative causal framework.
+
+## 6. Conclusion
+This study demonstrates that deprivation, taken at face value, explains almost nothing. IMD total explains virtually none of convenience-oriented purchasing (R² = 0.014), yet its sub-domains collectively explain nearly half (R² = 0.463) — revealing that opposing effects across deprivation dimensions cancel in the aggregate score. When socio-demographic factors compete alongside deprivation, income deprivation — the apparent dominant predictor — drops out entirely, replaced by education, living environment, and ethnic composition. Deprivation is not the mechanism through which structural inequality shapes food purchasing; it is a statistical shadow cast by the socio-demographic conditions that actually matter.
+
+Supply-side accessibility consistently ranks as the weakest predictor, challenging the food desert paradigm on two fronts: store proximity matters less than assumed, and the deprivation metrics used to identify vulnerable populations are themselves proxies for deeper structural forces. Improving food purchasing outcomes may therefore depend not on opening new stores or targeting areas by deprivation score, but on addressing the socio-demographic inequalities — educational, environmental, and cultural — that deprivation merely indexes.
+
+## References
+Aiello, L. M., Quercia, D., Schifanella, R., & Del Prete, L. (2020). Tesco Grocery 1.0, a large-scale dataset of grocery purchases in London. Scientific Data, 7(1), 57. https://doi.org/10.1038/s41597-020-0397-7
+
+Aitchison, J. (1986). The Statistical Analysis of Compositional Data. Springer Netherlands. https://doi.org/10.1007/978-94-009-4109-0
+
+Ali, R., Prestwich, A., Ge, J., Griffiths, C., Allmendinger, R., Shahgholian, A., Chen, Y., Mansournia, M. A., & Gilthorpe, M. S. (2025). Composite variable bias: Causal analysis of weight outcomes. International Journal of Obesity, 49(6), 1043–1050. https://doi.org/10.1038/s41366-025-01732-6
+
+Beydoun, M. A., Georgescu, M. F., Banerjee, S., Beydoun, H. A., Noren Hooten, N., Khubchandani, J., Maldonado, A. I., Tsai, J., Weiss, J., Evans, M. K., & Zonderman, A. B. (2026). Mapping food access: How neighborhood deprivation shapes healthy food availability in the United Kingdom. BMC Public Health. https://doi.org/10.1186/s12889-026-26664-2
+
+Broadbridge, T. P., Green, E. F., Preston, S. P., Fadai, N. T., & Maclean, J. (2025). Food purchase data reveals the locations of London's 'food deserts.' PLOS Complex Systems, 2(11), e0000072. https://doi.org/10.1371/journal.pcsy.0000072
+
+Cohen Ben-Arye, R., Bryant, C., & Hofmann, K. (2023). Every little helps: Exploring meat and animal product consumption in the Tesco 1.0 dataset. CABI Agriculture and Bioscience, 4(1), 35. https://doi.org/10.1186/s43170-023-00178-y
+
+Deas, I., Robson, B., Wong, C., & Bradford, M. (2003). Measuring Neighbourhood Deprivation: A Critique of the Index of Multiple Deprivation. Environment and Planning C: Government and Policy, 21(6), 883–903. https://doi.org/10.1068/c0240
+
+Kelly, B. (2026). Exploring the validity of using the English index of Multiple Deprivation as a proxy for individual or household income. Public Health, 254, 106227. https://doi.org/10.1016/j.puhe.2026.106227
+
+Machefer, M., Thomas, A.-C., Meroni, M., Veiga Lopez Pena, J. M., Ronco, M., Corbane, C., & Rembold, F. (2025). Potentialitations of machine learning modeling for forecasting Acute Food Insecurity. Global Food Security, 45, 100859. https://doi.org/10.1016/j.gfs.2025.100859
+
+Sterman, J. (2022, May). System Dynamics: Systems Thinking and Modeling for a Complex World. ESD Working Papers;ESD-WP-2003-01.13-ESD Internal Symposium. http://hdl.handle.net/1721.1/102741

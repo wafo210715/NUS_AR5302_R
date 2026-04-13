@@ -1,0 +1,35 @@
+# Large raw data
+tesco-data/
+data/raw/
+tesco-data.zip
+
+# Computation cache
+cache/
+
+# R render artifacts
+*_cache/
+*_files/
+.Rhistory
+.RData
+.Ruserdata
+
+# Rendered HTML (regenerated from Rmd)
+*.html
+
+# OS
+.DS_Store
+
+# Generated outputs (regenerate from scripts)
+output/*.gpkg
+output/*.png
+output/*.html
+output/shp/
+output/*_files/
+output/*_cache/
+
+# Literature PDFs
+literature/
+
+# Python
+__pycache__/
+*.pyc

@@ -1,0 +1,301 @@
+---
+title: "Stage 1: Multi-Scale Tesco Store Coverage"
+author: ""
+date: ""
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    fig_width: 14
+    fig_height: 12
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center"
+)
+
+# ── Packages ──────────────────────────────────────────────────────────
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(scales)
+library(knitr)
+
+sf_use_s2(FALSE)                       # avoid rendering artefacts with BNG
+```
+
+```{r paths}
+# Resolve project root (two levels up from scripts/)
+PROJ <- normalizePath("..")
+CSV  <- file.path(PROJ, "output/csv")
+SHP  <- file.path(PROJ, "output/shp")
+```
+
+---
+
+## 1. Import POI Data
+
+```{r poi}
+poi <- read.csv(file.path(CSV, "poi_tesco_stores.csv"))
+cat(sprintf("Loaded %d Tesco stores\n", nrow(poi)))
+cat("Columns:", paste(names(poi), collapse = ", "), "\n")
+cat("Store types:\n")
+print(table(poi$store_type))
+
+# Convert to sf points (EPSG:4326) so we can plot on top of shapefiles
+poi_sf <- st_as_sf(poi, coords = c("lon", "lat"), crs = "EPSG:4326")
+poi_sf <- st_transform(poi_sf, crs = 27700)   # reproject to British National Grid
+```
+
+---
+
+## 2. LSOA Level (n ≈ 4 800)
+
+```{r lsoa}
+lsoa_shp <- st_read(file.path(SHP, "lsoa_boundaries/lsoa_boundaries.shp"),
+                    quiet = TRUE)
+lsoa_csv <- read.csv(file.path(CSV, "coverage_lsoa.csv"))
+
+# Shapefile for geometry, CSV for attributes
+lsoa <- lsoa_shp %>%
+  select(lsoa_code, geometry) %>%
+  left_join(lsoa_csv, by = "lsoa_code") %>%
+  filter(!is.na(total_coverage)) %>%
+  st_make_valid()
+
+cat(sprintf("LSOA units: %d\n", nrow(lsoa)))
+cat(sprintf("Coverage: mean = %.1f%%, SD = %.1f%%, range = [%.1f, %.1f]\n",
+            mean(lsoa$total_coverage), sd(lsoa$total_coverage),
+            min(lsoa$total_coverage), max(lsoa$total_coverage)))
+```
+
+```{r lsoa-chloropleth, fig.width = 10, fig.height = 9}
+ggplot(lsoa) +
+  geom_sf(aes(fill = total_coverage), colour = NA, linewidth = 0) +
+  geom_sf(data = poi_sf, colour = "black", size = 0.3, alpha = 0.4) +
+  scale_fill_gradient2(
+    low = "#2166AC", mid = "#F7F7F7", high = "#B2182B",
+    midpoint = 50,
+    name = "Coverage\n(% area)",
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 20),
+    labels = percent_format(scale = 1, suffix = "%")
+  ) +
+  labs(title = "LSOA Level",
+       subtitle = sprintf("n = %d | Mean = %.1f%% | SD = %.1f%%",
+                          nrow(lsoa), mean(lsoa$total_coverage),
+                          sd(lsoa$total_coverage)),
+       caption = "15-min walking isochrone coverage | Black dots = Tesco stores") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position  = "right",
+        legend.key.width = unit(1.5, "cm"),
+        axis.text       = element_blank(),
+        axis.ticks      = element_blank())
+```
+
+---
+
+## 3. MSOA Level (n ≈ 950)
+
+```{r msoa}
+msoa_shp <- st_read(file.path(SHP, "msoa_boundaries/msoa_boundaries.shp"),
+                    quiet = TRUE)
+msoa_csv <- read.csv(file.path(CSV, "coverage_msoa.csv"))
+
+msoa <- msoa_shp %>%
+  select(MSOA11CD, geometry) %>%
+  left_join(msoa_csv, by = "MSOA11CD") %>%
+  filter(!is.na(total_coverage)) %>%
+  st_make_valid()
+
+cat(sprintf("MSOA units: %d\n", nrow(msoa)))
+cat(sprintf("Coverage: mean = %.1f%%, SD = %.1f%%, range = [%.1f, %.1f]\n",
+            mean(msoa$total_coverage), sd(msoa$total_coverage),
+            min(msoa$total_coverage), max(msoa$total_coverage)))
+```
+
+```{r msoa-chloropleth, fig.width = 10, fig.height = 9}
+ggplot(msoa) +
+  geom_sf(aes(fill = total_coverage), colour = NA, linewidth = 0) +
+  geom_sf(data = poi_sf, colour = "black", size = 0.3, alpha = 0.4) +
+  scale_fill_gradient2(
+    low = "#2166AC", mid = "#F7F7F7", high = "#B2182B",
+    midpoint = 50,
+    name = "Coverage\n(% area)",
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 20),
+    labels = percent_format(scale = 1, suffix = "%")
+  ) +
+  labs(title = "MSOA Level",
+       subtitle = sprintf("n = %d | Mean = %.1f%% | SD = %.1f%%",
+                          nrow(msoa), mean(msoa$total_coverage),
+                          sd(msoa$total_coverage)),
+       caption = "15-min walking isochrone coverage | Black dots = Tesco stores") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position  = "right",
+        legend.key.width = unit(1.5, "cm"),
+        axis.text       = element_blank(),
+        axis.ticks      = element_blank())
+```
+
+---
+
+## 4. Ward Level (n ≈ 630)
+
+```{r ward}
+ward_shp <- st_read(file.path(SHP, "ward_boundaries/ward_boundaries.shp"),
+                    quiet = TRUE)
+ward_csv <- read.csv(file.path(CSV, "coverage_ward.csv"))
+
+ward <- ward_shp %>%
+  select(WD11CD, geometry) %>%
+  left_join(ward_csv, by = "WD11CD") %>%
+  filter(!is.na(total_coverage)) %>%
+  st_make_valid()
+
+cat(sprintf("Ward units: %d\n", nrow(ward)))
+cat(sprintf("Coverage: mean = %.1f%%, SD = %.1f%%, range = [%.1f, %.1f]\n",
+            mean(ward$total_coverage), sd(ward$total_coverage),
+            min(ward$total_coverage), max(ward$total_coverage)))
+```
+
+```{r ward-chloropleth, fig.width = 10, fig.height = 9}
+ggplot(ward) +
+  geom_sf(aes(fill = total_coverage), colour = NA, linewidth = 0) +
+  geom_sf(data = poi_sf, colour = "black", size = 0.3, alpha = 0.4) +
+  scale_fill_gradient2(
+    low = "#2166AC", mid = "#F7F7F7", high = "#B2182B",
+    midpoint = 50,
+    name = "Coverage\n(% area)",
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 20),
+    labels = percent_format(scale = 1, suffix = "%")
+  ) +
+  labs(title = "Ward Level",
+       subtitle = sprintf("n = %d | Mean = %.1f%% | SD = %.1f%%",
+                          nrow(ward), mean(ward$total_coverage),
+                          sd(ward$total_coverage)),
+       caption = "15-min walking isochrone coverage | Black dots = Tesco stores") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position  = "right",
+        legend.key.width = unit(1.5, "cm"),
+        axis.text       = element_blank(),
+        axis.ticks      = element_blank())
+```
+
+---
+
+## 5. Borough Level (n = 33)
+
+```{r borough}
+bor_shp <- st_read(file.path(SHP, "borough_boundaries/borough_boundaries.shp"),
+                   quiet = TRUE)
+bor_csv <- read.csv(file.path(CSV, "coverage_borough.csv"))
+
+bor <- bor_shp %>%
+  select(bor_code, geometry) %>%
+  rename(borough_code = bor_code) %>%
+  left_join(bor_csv, by = "borough_code") %>%
+  filter(!is.na(total_coverage)) %>%
+  st_make_valid()
+
+cat(sprintf("Borough units: %d\n", nrow(bor)))
+cat(sprintf("Coverage: mean = %.1f%%, SD = %.1f%%, range = [%.1f, %.1f]\n",
+            mean(bor$total_coverage), sd(bor$total_coverage),
+            min(bor$total_coverage), max(bor$total_coverage)))
+```
+
+```{r borough-chloropleth, fig.width = 10, fig.height = 9}
+ggplot(bor) +
+  geom_sf(aes(fill = total_coverage), colour = "white", linewidth = 0.3) +
+  geom_sf(data = poi_sf, colour = "black", size = 0.8, alpha = 0.5) +
+  scale_fill_gradient2(
+    low = "#2166AC", mid = "#F7F7F7", high = "#B2182B",
+    midpoint = 50,
+    name = "Coverage\n(% area)",
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 20),
+    labels = percent_format(scale = 1, suffix = "%")
+  ) +
+  labs(title = "London Borough Level",
+       subtitle = sprintf("n = %d | Mean = %.1f%% | SD = %.1f%%",
+                          nrow(bor), mean(bor$total_coverage),
+                          sd(bor$total_coverage)),
+       caption = "15-min walking isochrone coverage | Black dots = Tesco stores") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position  = "right",
+        legend.key.width = unit(1.5, "cm"),
+        axis.text       = element_blank(),
+        axis.ticks      = element_blank())
+```
+
+---
+
+## 6. Multi-Scale Comparison
+
+```{r helper}
+# Reusable choropleth builder (no legend — shared legend on one panel)
+make_panel <- function(gdf, title, point_size = 0.3) {
+  p <- ggplot(gdf) +
+    geom_sf(aes(fill = total_coverage), colour = NA, linewidth = 0) +
+    geom_sf(data = poi_sf, colour = "black", size = point_size, alpha = 0.4) +
+    scale_fill_gradient2(
+      low = "#2166AC", mid = "#F7F7F7", high = "#B2182B",
+      midpoint = 50,
+      limits = c(0, 100),
+      breaks = seq(0, 100, by = 20),
+      labels = percent_format(scale = 1, suffix = "%")
+    ) +
+    labs(title = title,
+         subtitle = sprintf("n = %d | Mean = %.1f%% | SD = %.1f%%",
+                            nrow(gdf),
+                            mean(gdf$total_coverage, na.rm = TRUE),
+                            sd(gdf$total_coverage, na.rm = TRUE))) +
+    theme_minimal(base_size = 10) +
+    theme(legend.position  = "none",
+          plot.title       = element_text(face = "bold", size = 12),
+          plot.subtitle    = element_text(size = 8, colour = "grey40"),
+          axis.text        = element_blank(),
+          axis.ticks       = element_blank(),
+          plot.margin      = margin(2, 2, 2, 2, unit = "pt"))
+  # boundary lines for coarser geographies
+  if (nrow(gdf) <= 40) {
+    p <- p + geom_sf(colour = "white", linewidth = 0.3, fill = NA)
+  }
+  p
+}
+```
+
+```{r multiscale, fig.width = 16, fig.height = 14}
+p1 <- make_panel(lsoa, "LSOA Level",           point_size = 0.2)
+p2 <- make_panel(msoa, "MSOA Level",           point_size = 0.3)
+p3 <- make_panel(ward, "Ward Level",           point_size = 0.3)
+p4 <- make_panel(bor,  "London Borough Level", point_size = 0.8)
+
+# Shared legend on the MSOA panel
+p2 <- p2 +
+  theme(legend.position  = "right",
+        legend.key.width = unit(1.5, "cm")) +
+  labs(fill = "Coverage\n(% area)")
+
+combined <- (p1 | p2) / (p3 | p4) +
+  plot_layout(heights = c(1, 1)) +
+  plot_annotation(
+    title    = "Tesco Store Accessibility Across London: Multi-Scale Comparison",
+    subtitle = "15-minute walking isochrone coverage (% of area covered by at least one Tesco store)",
+    caption  = "LSOA (~1,500 residents) | MSOA (~7,200) | Ward (electoral division) | Borough (~250,000) | Black dots = Tesco stores",
+    theme    = theme(
+      plot.title    = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 10, colour = "grey40"),
+      plot.caption  = element_text(size = 7,  colour = "grey50", hjust = 0.5)
+    )
+  )
+
+combined
+```

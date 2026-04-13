@@ -1,0 +1,363 @@
+---
+title: "Stage 1 & 2: Supply-Side Spatial Analysis & Food Purchasing Patterns"
+author: ""
+date: ""
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include = FALSE}
+# ── 1. Global Knitr Options ───────────────────────────────────────────
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width  = 10,  # Standardized figure width
+  fig.height = 6,   # Standardized figure height
+  dpi        = 300, # High res for publication
+  cache   = TRUE
+)
+
+# ── Packages ──────────────────────────────────────────────────────────
+required_packages <- c("sf", "dplyr", "ggplot2", "patchwork", "scales",
+                       "tidyr", "spdep", "cluster", "factoextra",
+                       "glmnet", "broom", "forcats", "modelsummary", "gtsummary")
+
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, repos = "[https://cloud.r-project.org](https://cloud.r-project.org)", quiet = TRUE)
+  }
+}
+
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(tidyr)
+library(glmnet)
+library(broom)
+library(forcats)
+
+sf_use_s2(FALSE)  # Required for projected data (EPSG:27700)
+```
+
+```{r}
+# ── 2. Publication Visualization Rules ──────────────────────────────────
+
+# A. Discrete Color Palette (Okabe-Ito: Colorblind safe, high contrast)
+pub_discrete <- c(
+  "#E69F00", # Orange
+  "#56B4E9", # Light Blue
+  "#009E73", # Green
+  "#F0E442", # Yellow
+  "#0072B2", # Dark Blue
+  "#D55E00", # Vermilion
+  "#CC79A7"  # Reddish Purple
+)
+
+# B. Master ggplot Theme for standard plots (scatter, bar, dumbbell)
+theme_publication <- function(base_size = 11, base_family = "sans") {
+  theme_minimal(base_size = base_size, base_family = base_family) +
+    theme(
+      plot.title    = element_text(face = "bold", size = rel(1.2), margin = margin(b = 5)),
+      plot.subtitle = element_text(size = rel(0.9), colour = "grey40", margin = margin(b = 15)),
+      plot.caption  = element_text(size = rel(0.7), colour = "grey50", hjust = 0, margin = margin(t = 15)),
+      axis.title.x  = element_text(face = "bold", margin = margin(t = 10)),
+      axis.title.y  = element_text(face = "bold", margin = margin(r = 10)),
+      axis.text     = element_text(colour = "black"),
+      axis.line     = element_line(colour = "black", linewidth = 0.3),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(colour = "grey90", linewidth = 0.3),
+      legend.position = "bottom",
+      legend.title    = element_text(face = "bold", size = rel(0.9)),
+      legend.text     = element_text(size = rel(0.8)),
+      panel.background = element_rect(fill = "white", colour = NA),
+      plot.background  = element_rect(fill = "white", colour = NA)
+    )
+}
+
+# C. Master ggplot Theme specifically for MAPS (removes axes and grids)
+theme_publication_map <- function(base_size = 11, base_family = "sans") {
+  theme_publication(base_size, base_family) %+replace%
+    theme(
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      axis.line = element_blank(),
+      axis.title = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+}
+```
+
+```{r}
+# Resolve project root (two levels up from scripts/)
+PROJ <- normalizePath("..")
+CSV  <- file.path(PROJ, "output/csv")
+SHP  <- file.path(PROJ, "output/shp")
+```
+
+```{r}
+# Load POI
+poi <- read.csv(file.path(CSV, "poi_tesco_stores.csv")) %>% filter(store_type != "Unknown")
+poi_sf <- st_as_sf(poi, coords = c("lon", "lat"), crs = "EPSG:4326") %>% st_transform(27700)
+
+# Load Boundaries
+lsoa_geom <- st_read(file.path(SHP, "lsoa_boundaries/lsoa_boundaries.shp"), quiet = TRUE) %>% select(lsoa_code, geometry) %>% st_make_valid()
+msoa_geom <- st_read(file.path(SHP, "msoa_boundaries/msoa_boundaries.shp"), quiet = TRUE) %>% select(MSOA11CD, geometry) %>% st_make_valid()
+ward_geom <- st_read(file.path(SHP, "ward_boundaries/ward_boundaries.shp"), quiet = TRUE) %>% select(WD11CD, geometry) %>% st_make_valid()
+bor_geom <- st_read(file.path(SHP, "borough_boundaries/borough_boundaries.shp"), quiet = TRUE) %>% select(bor_code, geometry) %>% rename(borough_code = bor_code) %>% st_make_valid()
+```
+
+```{r}
+BUFFER_DIST <- 1250
+
+poi_sf <- poi_sf %>% mutate(buffer = st_buffer(geometry, dist = BUFFER_DIST))
+
+buffers_by_type <- poi_sf %>% group_by(store_type) %>% summarise(geometry = st_union(buffer), .groups = "drop")
+buffer_all <- poi_sf %>% summarise(geometry = st_union(buffer))
+```
+
+```{r}
+# Appying theme_publication_map() and pub_discrete
+ggplot() +
+  geom_sf(data = msoa_geom, fill = NA, colour = "grey80", linewidth = 0.1) +
+  geom_sf(data = buffers_by_type, aes(fill = store_type), alpha = 0.4, colour = NA) +
+  geom_sf(data = poi_sf, aes(colour = store_type), size = 0.8, alpha = 0.8) +
+  scale_fill_manual(values = pub_discrete, name = "Store Type") +
+  scale_colour_manual(values = pub_discrete, name = "Store Type") +
+  labs(
+    title = "Tesco Store Locations with 1250m Walking Buffers",
+    subtitle = sprintf("%d stores | Buffer = 15-min walk (%dm)", nrow(poi_sf), BUFFER_DIST),
+    caption = "Data Source: Point of Interest Data | Map uses EPSG:27700"
+  ) +
+  theme_publication_map() +
+  theme(legend.position = "right")
+```
+
+```{r}
+compute_coverage <- function(boundaries, buffers_by_type, buffer_all, id_col) {
+  boundaries <- boundaries %>% mutate(area_m2 = as.numeric(st_area(geometry)))
+  id_col_sym <- sym(id_col)
+  store_types <- buffers_by_type$store_type
+  cov_cols <- character(0)
+
+  for (st in store_types) {
+    buf <- buffers_by_type %>% filter(store_type == !!st)
+    col_name <- paste0(tolower(st), "_coverage")
+    inter <- st_intersection(boundaries %>% select(all_of(id_col), geometry), buf)
+    overlap_df <- inter %>%
+      mutate(overlap_m2 = as.numeric(st_area(geometry))) %>%
+      as.data.frame() %>%
+      group_by(!!id_col_sym) %>%
+      summarise(overlap_m2 = sum(overlap_m2), .groups = "drop") %>%
+      rename(!!col_name := overlap_m2)
+
+    boundaries <- boundaries %>%
+      left_join(overlap_df, by = id_col) %>%
+      mutate(!!col_name := (!!sym(col_name)) / area_m2 * 100,
+             !!col_name := replace_na(!!sym(col_name), 0))
+    cov_cols <- c(cov_cols, col_name)
+  }
+
+  inter_all <- st_intersection(boundaries %>% select(all_of(id_col), geometry), buffer_all)
+  total_df <- inter_all %>%
+    mutate(total_m2 = as.numeric(st_area(geometry))) %>%
+    as.data.frame() %>%
+    group_by(!!id_col_sym) %>%
+    summarise(total_m2 = sum(total_m2), .groups = "drop") %>%
+    rename(total_coverage = total_m2)
+
+  boundaries <- boundaries %>%
+    left_join(total_df, by = id_col) %>%
+    mutate(
+      total_coverage = total_coverage / area_m2 * 100,
+      total_coverage = replace_na(total_coverage, 0),
+      overlap_index = !!sym(cov_cols[1]) + !!sym(cov_cols[2]) + !!sym(cov_cols[3]) - total_coverage,
+      unique_types = (!!sym(cov_cols[1]) > 0) + (!!sym(cov_cols[2]) > 0) + (!!sym(cov_cols[3]) > 0)
+    ) %>% select(-area_m2)
+
+  return(boundaries)
+}
+```
+
+```{r}
+lsoa_cov <- compute_coverage(lsoa_geom, buffers_by_type, buffer_all, "lsoa_code")
+msoa_cov <- compute_coverage(msoa_geom, buffers_by_type, buffer_all, "MSOA11CD")
+ward_cov <- compute_coverage(ward_geom, buffers_by_type, buffer_all, "WD11CD")
+bor_cov <- compute_coverage(bor_geom, buffers_by_type, buffer_all, "borough_code")
+```
+
+```{r}
+# Using theme_publication_map() and a standardized continuous spatial palette (magma)
+make_panel <- function(gdf, title, point_size = 0.3) {
+  p <- ggplot(gdf) +
+    geom_sf(aes(fill = total_coverage), colour = NA, linewidth = 0) +
+    geom_sf(data = poi_sf, colour = "black", size = point_size, alpha = 0.4) +
+    scale_fill_viridis_c(
+      option = "magma", direction = -1,
+      labels = percent_format(scale = 1, suffix = "%")
+    ) +
+    labs(
+      title = title,
+      subtitle = sprintf("Mean = %.1f%% | SD = %.1f%%", 
+                         mean(gdf$total_coverage, na.rm = TRUE), 
+                         sd(gdf$total_coverage, na.rm = TRUE))
+    ) +
+    theme_publication_map(base_size = 10) +
+    theme(legend.position = "none")
+  
+  if (nrow(gdf) <= 40) p <- p + geom_sf(colour = "white", linewidth = 0.3, fill = NA)
+  p
+}
+
+p1 <- make_panel(lsoa_cov, "LSOA Level", point_size = 0.2)
+p2 <- make_panel(msoa_cov, "MSOA Level", point_size = 0.3)
+p3 <- make_panel(ward_cov, "Ward Level", point_size = 0.3)
+p4 <- make_panel(bor_cov,  "London Borough Level", point_size = 0.8)
+
+# Legend on MSOA panel
+p2 <- p2 + theme(legend.position = "right", legend.key.height = unit(1.5, "cm")) + labs(fill = "Coverage")
+
+(p1 | p2) / (p3 | p4) +
+  plot_layout(heights = c(1, 1)) +
+  plot_annotation(
+    title = "Tesco Store Accessibility Across London: Multi-Scale Comparison",
+    subtitle = "15-minute walking buffer coverage (% of area covered)",
+    theme = theme(plot.title = element_text(face = "bold", size = 16), plot.subtitle = element_text(size = 12, colour = "grey40"))
+  )
+```
+
+```{r}
+features <- msoa_cov %>% st_drop_geometry() %>% select(express_coverage, superstore_coverage, extra_coverage) %>% scale()
+set.seed(42)
+km <- kmeans(features, centers = 4, nstart = 25)
+msoa_cov$cluster <- factor(km$cluster)
+```
+
+```{r}
+# Using theme_publication_map() and pub_discrete
+ggplot(msoa_cov) +
+  geom_sf(aes(fill = cluster), colour = "white", linewidth = 0.05) +
+  scale_fill_manual(values = pub_discrete, name = "Cluster") +
+  labs(
+    title = "K-Means Service Typology Clusters (MSOA Level)",
+    subtitle = "k = 4 | Features: Express, Superstore, Extra coverage",
+    caption = "Derived via K-Means clustering of coverage percentages"
+  ) +
+  theme_publication_map() +
+  theme(legend.position = "right")
+```
+
+```{r}
+grocery <- read.csv(file.path(PROJ, "tesco-data/7796666/year_lsoa_grocery.csv"))
+FOOD_CATEGORIES <- c("f_beer", "f_dairy", "f_eggs", "f_fats_oils", "f_fish",
+                     "f_fruit_veg", "f_grains", "f_meat_red", "f_poultry",
+                     "f_readymade", "f_soft_drinks", "f_sweets", "f_wine")
+available <- FOOD_CATEGORIES[FOOD_CATEGORIES %in% names(grocery)]
+
+X_food <- grocery %>% select(all_of(available)) %>% mutate(across(everything(), ~ replace_na(.x, 0)))
+pca_fit <- prcomp(X_food, scale. = TRUE)
+pca_lsoa <- data.frame(lsoa_code = grocery$area_id, PC1 = pca_fit$x[, 1], PC2 = pca_fit$x[, 2])
+```
+
+```{r}
+imd <- read.csv(file.path(CSV, "imd_subdomains.csv"))
+lookup <- read.csv(file.path(PROJ, "data/raw/lsoa_full_lookup.csv"))
+pop <- read.csv(file.path(PROJ, "tesco-data/7796666/year_lsoa_grocery.csv")) %>% select(lsoa_code = area_id, population)
+
+domain_names <- c("income", "employment", "education", "health", "crime", "barriers", "living_environment")
+
+msoa_df <- pca_lsoa %>%
+  inner_join(imd, by = "lsoa_code") %>%
+  inner_join(lookup %>% select(lsoa_code, MSOA11CD), by = "lsoa_code") %>%
+  inner_join(pop, by = "lsoa_code") %>%
+  filter(!is.na(PC1), !is.na(PC2), population > 0) %>%
+  group_by(MSOA11CD) %>%
+  summarise(across(all_of(c("PC1", "PC2", "imd_score", domain_names)), ~ weighted.mean(.x, w = population, na.rm = TRUE), .names = "{.col}"), .groups = "drop")
+
+z_vars <- c("PC1", "PC2", "imd_score", domain_names)
+msoa_df <- msoa_df %>% mutate(across(all_of(z_vars), scale, .names = "{.col}_z"))
+```
+
+```{r}
+# The new spatial PCA maps using the diverging scale and theme_publication_map()
+msoa_pca_spatial <- msoa_geom %>% left_join(msoa_df, by = "MSOA11CD") %>% filter(!is.na(PC1))
+
+plot_spatial_pca <- function(spatial_data, metric, title, subtitle) {
+  ggplot(spatial_data) +
+    geom_sf(aes_string(fill = metric), colour = NA, linewidth = 0) +
+    geom_sf(data = bor_geom, fill = NA, colour = "white", linewidth = 0.3) +
+    scale_fill_distiller(palette = "RdBu", direction = -1, name = "Z-Score", limits = c(-3, 3), oob = scales::squish) +
+    labs(title = title, subtitle = subtitle) +
+    theme_publication_map() +
+    theme(
+      plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5),
+      legend.position = "bottom", legend.key.width = unit(1.5, "cm")
+    )
+}
+
+map_pc1 <- plot_spatial_pca(msoa_pca_spatial, "PC1_z", "Spatial Distribution of 'Convenience' Purchasing (PC1)", "High scores indicate reliance on processed/ready-made foods")
+map_pc2 <- plot_spatial_pca(msoa_pca_spatial, "PC2_z", "Spatial Distribution of 'Variety' Purchasing (PC2)", "High scores indicate a broader, more diverse grocery basket")
+
+map_pc1 + map_pc2 + plot_layout(ncol = 2) + plot_annotation(caption = "Borough boundaries overlaid in white.", theme = theme(plot.caption = element_text(colour = "grey50", hjust = 0.5)))
+```
+
+```{r}
+model_a_pc1 <- lm(PC1_z ~ imd_score_z, data = msoa_df)
+model_b_pc1 <- lm(as.formula(paste("PC1_z ~", paste(domain_names, collapse = " + "))), data = msoa_df)
+```
+
+```{r}
+X_mat <- as.matrix(msoa_df[, domain_names])
+y_pc1 <- msoa_df$PC1_z
+
+set.seed(42)
+cv_pc1 <- cv.glmnet(X_mat, y_pc1, alpha = 1, nfolds = 5)
+lasso_pc1 <- glmnet(X_mat, y_pc1, alpha = 1, lambda = cv_pc1$lambda.min)
+lasso_coefs_pc1 <- as.numeric(coef(lasso_pc1))[-1]
+names(lasso_coefs_pc1) <- domain_names
+```
+
+```{r}
+# The new Dumbbell Plot using theme_publication()
+domain_labels <- c(income = "Income", employment = "Employment", education = "Education", health = "Health", crime = "Crime", barriers = "Barriers to Housing", living_environment = "Living Environment")
+
+ols_df <- tidy(model_b_pc1) %>% filter(term != "(Intercept)") %>% select(term, ols_coef = estimate)
+lasso_df <- data.frame(term = names(lasso_coefs_pc1), lasso_coef = lasso_coefs_pc1)
+
+dumbbell_df <- ols_df %>%
+  inner_join(lasso_df, by = "term") %>%
+  mutate(
+    term = recode(term, !!!domain_labels),
+    term = fct_reorder(term, abs(ols_coef), .desc = FALSE),
+    eliminated = ifelse(abs(lasso_coef) < 1e-5, TRUE, FALSE)
+  )
+
+ggplot(dumbbell_df) +
+  geom_vline(xintercept = 0, colour = "grey70", linewidth = 0.5, linetype = "dashed") +
+  geom_segment(aes(x = ols_coef, xend = lasso_coef, y = term, yend = term), colour = "grey60", linewidth = 1, arrow = arrow(length = unit(0.2, "cm"), type = "closed")) +
+  geom_point(aes(x = ols_coef, y = term), colour = pub_discrete[5], size = 3.5, shape = 16) + # Dark Blue for OLS
+  geom_point(aes(x = lasso_coef, y = term, fill = eliminated), shape = 21, colour = "black", size = 3.5, stroke = 0.5) +
+  scale_fill_manual(values = c("FALSE" = pub_discrete[6], "TRUE" = "white")) + # Vermilion for LASSO
+  labs(
+    title = "Impact of L1 Regularization on Deprivation Sub-Domains",
+    subtitle = "Arrows indicate coefficient shrinkage from standard OLS to LASSO (PC1: Convenience)",
+    x = "Standardised Coefficient", y = NULL,
+    caption = "Blue = OLS Estimate | Vermilion = LASSO Estimate | White = Eliminated by penalty"
+  ) +
+  theme_publication() +
+  theme(
+    legend.position = "none",
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(face = "bold")
+  )
+```
+
